@@ -144,13 +144,15 @@ class SurveyState:
         self._next_id += 1
         uncollected = [i for i in self.items if not i['collected']]
         item = {
-            'id':          self._next_id,
-            'name':        name,
-            'offset':      offset,        # {'east': float, 'north': float}
-            'pixel_pos':   None,          # (x, y) in canvas coords  (y = 0 at canvas top)
-            'grid_index':  len(uncollected),
-            'collected':   False,
-            'route_order': -1,
+            'id':              self._next_id,
+            'name':            name,
+            'offset':          offset,        # {'east': float, 'north': float}
+            'pixel_pos':       None,          # (x, y) in canvas coords  (y = 0 at canvas top)
+            'pixel_estimates': [],            # all auto-placed estimates, averaged for precision
+            'grid_index':      len(uncollected),
+            'collected':       False,
+            'skipped':         False,
+            'route_order':     -1,
         }
         self.items.append(item)
         return item
@@ -297,6 +299,56 @@ class ResizeGrip(QWidget):
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# Shared overlay helpers
+# ─────────────────────────────────────────────────────────────────────────────
+def _draw_lock_icon(p: QPainter, cx: int, cy: int, locked: bool):
+    """Draw a small padlock icon centred at (cx, cy).
+
+    locked=True  → closed orange lock  (pass-through ON / inventory locked)
+    locked=False → open   green  lock  (interactive / inventory unlocked)
+    """
+    bw, bh = 8, 6          # body dimensions
+    bx = cx - bw // 2
+    by = cy + 1            # body top-left y
+
+    if locked:
+        body_c    = QColor(210, 95, 25, 230)
+        shackle_c = QColor(240, 155, 55, 230)
+    else:
+        body_c    = QColor(40, 175, 75, 190)
+        shackle_c = QColor(70, 215, 105, 190)
+
+    p.save()
+    p.setRenderHint(QPainter.Antialiasing)
+
+    # Body
+    p.setPen(Qt.NoPen)
+    p.setBrush(QBrush(body_c))
+    p.drawRoundedRect(bx, by, bw, bh, 2, 2)
+
+    # Shackle
+    sw = 4                 # shackle inner width / arc diameter
+    sx = cx - sw // 2      # shackle left x
+    arc_top = by - sw      # arc bounding-rect top
+
+    p.setBrush(Qt.NoBrush)
+    p.setPen(QPen(shackle_c, 1.5, Qt.SolidLine, Qt.RoundCap))
+
+    if locked:
+        # Closed: full semicircle + both legs
+        p.drawArc(sx, arc_top, sw, sw, 0, 180 * 16)
+        p.drawLine(sx,      by - sw // 2, sx,      by)
+        p.drawLine(sx + sw, by - sw // 2, sx + sw, by)
+    else:
+        # Open: quarter-arc (right side only) + right leg in body + left leg raised
+        p.drawArc(sx, arc_top, sw, sw, 0, 90 * 16)
+        p.drawLine(sx + sw, by - sw // 2, sx + sw, by)
+        p.drawLine(sx, arc_top - 2,       sx, by - sw // 2)
+
+    p.restore()
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # Map Overlay
 # ─────────────────────────────────────────────────────────────────────────────
 class MapOverlay(DragMixin, QWidget):
@@ -350,7 +402,11 @@ class MapOverlay(DragMixin, QWidget):
         # title
         p.setPen(QColor(180, 200, 220))
         p.setFont(QFont('Segoe UI', 9, QFont.Bold))
-        p.drawText(8, 0, w - 20, HEADER_H, Qt.AlignVCenter, 'Survey Map')
+        p.drawText(8, 0, w - 30, HEADER_H, Qt.AlignVCenter, 'Survey Map')
+
+        # lock / pass-through indicator
+        # closed = overlay is interactive (capturing clicks); open = clicks pass through
+        _draw_lock_icon(p, w - 14, HEADER_H // 2, not self._click_through)
 
         # ── canvas background ──
         cy = HEADER_H
@@ -403,6 +459,8 @@ class MapOverlay(DragMixin, QWidget):
 
             if item['collected']:
                 kind = 'collected'
+            elif item.get('skipped'):
+                continue  # hidden from map; still tracked in inventory
             elif item['id'] == self.state.active_id:
                 kind = 'active'
             else:
@@ -508,9 +566,13 @@ class SlotWidget(QFrame):
             return
 
         item = self.item
+        skipped = item.get('skipped', False)
 
         # background
-        if self.property('active_route'):
+        if skipped:
+            p.fillRect(0, 0, w, h, QColor(20, 20, 20, 180))
+            p.setPen(QPen(QColor(100, 100, 100, 100), 1))
+        elif self.property('active_route'):
             p.fillRect(0, 0, w, h, QColor(60, 45, 5, 200))
             p.setPen(QPen(QColor(255, 193, 7, 200), 2))
         else:
@@ -520,17 +582,21 @@ class SlotWidget(QFrame):
 
         # item name
         name = clean_name(item['name'])
-        p.setPen(QColor(220, 200, 160))
+        p.setPen(QColor(120, 110, 90) if skipped else QColor(220, 200, 160))
         p.setFont(QFont('Segoe UI', 7))
         p.drawText(2, 2, w - 4, h - 14, Qt.AlignTop | Qt.AlignHCenter | Qt.TextWordWrap, name)
 
         # slot number (bottom-left)
-        p.setPen(QColor(120, 120, 120, 180))
+        p.setPen(QColor(80, 80, 80, 180) if skipped else QColor(120, 120, 120, 180))
         p.setFont(QFont('Segoe UI', 7))
         p.drawText(3, h - 11, str(item['grid_index'] + 1))
 
-        # route order (top-right)
-        if item['route_order'] >= 0:
+        # skipped marker (top-right) or route order
+        if skipped:
+            p.setPen(QColor(160, 80, 80, 200))
+            p.setFont(QFont('Segoe UI', 7, QFont.Bold))
+            p.drawText(0, 2, w - 3, 14, Qt.AlignRight, '–')
+        elif item['route_order'] >= 0:
             p.setPen(QColor(255, 193, 7, 220))
             p.setFont(QFont('Segoe UI', 7, QFont.Bold))
             ro_text = str(item['route_order'] + 1)
@@ -600,6 +666,8 @@ class InventoryOverlay(DragMixin, QWidget):
 
         sc    = self.state.survey_count
         total = max(sc, len(uncollected)) if sc > 0 else len(uncollected)
+        if total == 0:
+            total = GRID_COLS   # show a placeholder row before any items are found
 
         # Compute slot width so 10 columns fill the full overlay width evenly
         slot_w = max(28, (self.width() - 12 - SLOT_GAP * (GRID_COLS - 1)) // GRID_COLS)
@@ -627,7 +695,10 @@ class InventoryOverlay(DragMixin, QWidget):
         p.fillRect(0, 0, w, HEADER_H, QColor(0, 0, 0, 185))
         p.setPen(QColor(180, 200, 220))
         p.setFont(QFont('Segoe UI', 9, QFont.Bold))
-        p.drawText(8, 0, w - 20, HEADER_H, Qt.AlignVCenter, 'Survey Inventory')
+        p.drawText(8, 0, w - 30, HEADER_H, Qt.AlignVCenter, 'Survey Inventory')
+
+        # lock / inventory-locked indicator
+        _draw_lock_icon(p, w - 14, HEADER_H // 2, self.app._inv_locked)
 
         # border
         p.setPen(QPen(QColor(100, 170, 255, 180), 1.5))
@@ -720,6 +791,12 @@ class ControlPanel(QWidget):
         row.addStretch()
         main.addLayout(row)
 
+        # ── Collapsible section (hidden until ChatLogs folder is selected) ──
+        self._survey_section = QWidget()
+        sec = QVBoxLayout(self._survey_section)
+        sec.setContentsMargins(0, 0, 0, 0)
+        sec.setSpacing(7)
+
         # ── Status row ────────────────────────────────────────────────────
         row2 = QHBoxLayout()
         row2.addWidget(self._label('Status:'))
@@ -734,7 +811,7 @@ class ControlPanel(QWidget):
         self.lbl_count = self._label('0 items', '#556')
         row2.addWidget(self.lbl_count)
         row2.addStretch()
-        main.addLayout(row2)
+        sec.addLayout(row2)
 
         # ── Survey controls ───────────────────────────────────────────────
         row3 = QHBoxLayout()
@@ -742,8 +819,8 @@ class ControlPanel(QWidget):
         self.sb_count = QSpinBox()
         self.sb_count.setRange(0, 999)
         self.sb_count.setValue(0)
-        self.sb_count.setSpecialValueText('—')   # 0 displays as "—" meaning "auto"
-        self.sb_count.setToolTip('How many survey maps you have (0 = auto)')
+        self.sb_count.setSpecialValueText('0')   # 0 displays as "—" meaning "auto"
+        self.sb_count.setToolTip('How many survey maps you have (0 = auto grow with matches surveys)')
         self.sb_count.setMaximumWidth(60)
         self.sb_count.setStyleSheet(
             'QSpinBox { background:#1a1a2e; color:#cde; border:1px solid #446; '
@@ -760,7 +837,7 @@ class ControlPanel(QWidget):
         for b in (self.btn_set_pos, self.btn_start, self.btn_done, self.btn_next, self.btn_reset):
             row3.addWidget(b)
         row3.addStretch()
-        main.addLayout(row3)
+        sec.addLayout(row3)
 
         # ── Opacity (stacked) + toggle buttons ───────────────────────────
         slider_col = QVBoxLayout()
@@ -803,14 +880,16 @@ class ControlPanel(QWidget):
                                           self.app.toggle_map_labels, '#1a2a3a')
         row4.addWidget(self.btn_labels)
         row4.addStretch()
-        main.addLayout(row4)
+        sec.addLayout(row4)
 
-        # ── Log display ───────────────────────────────────────────────────
         sep2 = QFrame(); sep2.setFrameShape(QFrame.HLine)
         sep2.setStyleSheet('color:#223;')
-        main.addWidget(sep2)
+        sec.addWidget(sep2)
 
-        self.lbl_log = QLabel('Ready.')
+        main.addWidget(self._survey_section)
+
+        # ── Log display ───────────────────────────────────────────────────
+        self.lbl_log = QLabel('Select a ChatLogs folder above to begin.')
         self.lbl_log.setWordWrap(True)
         self.lbl_log.setStyleSheet('color:#9ab; font-size:11px; padding:2px 0;')
         main.addWidget(self.lbl_log)
@@ -851,7 +930,14 @@ class ControlPanel(QWidget):
         has_chat_dir = getattr(self.app, '_chat_dir', None) is not None
         placed       = any(i.get('pixel_pos') for i in state.uncollected())
 
-        self.btn_set_pos.setVisible(state.phase != 'routing')
+        was_visible = self._survey_section.isVisible()
+        self._survey_section.setVisible(has_chat_dir)
+        if has_chat_dir != was_visible:
+            self.adjustSize()
+
+        self.btn_set_pos.setVisible(
+            state.phase not in ('routing',) and (not has_pos or state.phase == 'set_player')
+        )
         self.btn_start.setVisible(
             state.phase == 'idle' and has_pos and has_chat_dir
         )
@@ -892,6 +978,7 @@ class SurveyApp:
         self._blink_timer.start(600)
 
         self._load_settings()
+        self.control.refresh()  # update section visibility after settings are loaded
 
         self.map_overlay.show()
         self.inv_overlay.show()
@@ -909,6 +996,7 @@ class SurveyApp:
         self.control.lbl_file_status.setText('Chat dir loaded')
         self._set_log('ChatLogs folder selected — monitoring for survey markers and collections.')
         self.save_settings()
+        self._refresh_all()
 
     # ── phase transitions ─────────────────────────────────────────────────────
     def enter_set_player(self):
@@ -942,10 +1030,18 @@ class SurveyApp:
         )
 
     def advance_route(self):
+        # Mark the current target as skipped — removes it from the map
+        current_id = self.state.active_id
+        if current_id is not None:
+            cur = next((i for i in self.state.items if i['id'] == current_id), None)
+            if cur:
+                cur['skipped'] = True
+
         remaining = [
             (idx, iid) for idx, iid in enumerate(self.state.route_order)
             if idx > self.state.route_idx
             and not next((i for i in self.state.items if i['id'] == iid), {}).get('collected')
+            and not next((i for i in self.state.items if i['id'] == iid), {}).get('skipped')
         ]
         if not remaining:
             self._set_log('🎉 All stops visited!')
@@ -984,9 +1080,18 @@ class SurveyApp:
 
         if state.phase == 'set_player':
             state.player_pos = (cx, cy)
-            state.phase      = 'idle'
+            if state.pending_calib is not None:
+                # Position was repositioned mid-calibration — resume calibration
+                state.phase = 'calibrating'
+                self._set_log('Position updated. Click the map where the pending item appears to calibrate scale.')
+            elif self._chat_dir:
+                # Auto-advance: skip the manual "Start Survey" button click
+                state.phase = 'surveying'
+                self._set_log('Position set — watching for survey markers. Survey your maps in-game!')
+            else:
+                state.phase = 'idle'
+                self._set_log('Position set. Select a ChatLogs folder to start surveying.')
             self._refresh_all()
-            self._set_log('Position set. Click "Start Survey" to begin watching the log.')
             self.save_settings()
             return
 
@@ -1044,6 +1149,37 @@ class SurveyApp:
             self._set_log('⚠ No player position set — click "Set My Position" first.')
             return
 
+        # Deduplication: same name AND similar coordinates = same map clicked twice
+        # Different items of the same type (e.g. two "Deer Antler" surveys) will have
+        # offsets far enough apart that they won't match within the tolerance.
+        _TOL = 2.0  # metres
+        existing = next(
+            (i for i in state.items
+             if not i['collected']
+             and i['name'] == name
+             and abs(i['offset']['east']  - offset['east'])  < _TOL
+             and abs(i['offset']['north'] - offset['north']) < _TOL),
+            None
+        )
+        if existing:
+            # Improve position estimate by averaging pixel placements
+            if state.scale is not None and existing['pixel_pos'] is not None \
+                    and existing['pixel_estimates']:
+                cw = self.map_overlay.width()
+                ch = self.map_overlay.canvas_h
+                new_px = state.player_to_pixel(offset, cw, ch)
+                if new_px:
+                    existing['pixel_estimates'].append(new_px)
+                    n = len(existing['pixel_estimates'])
+                    avg_x = sum(e[0] for e in existing['pixel_estimates']) / n
+                    avg_y = sum(e[1] for e in existing['pixel_estimates']) / n
+                    existing['pixel_pos'] = (avg_x, avg_y)
+                    self._set_log(
+                        f'📍 {clean_name(name)} refined ({n} readings).'
+                    )
+                    self._refresh_all()
+            return  # duplicate — do not add a new item
+
         item = state.add_item(name, offset)
 
         if state.scale is None:
@@ -1055,10 +1191,13 @@ class SurveyApp:
                 f'Click the map where it appears to calibrate the scale.'
             )
         else:
-            # Auto-place
+            # Auto-place and record the estimate
             cw = self.map_overlay.width()
             ch = self.map_overlay.canvas_h
-            item['pixel_pos'] = state.player_to_pixel(offset, cw, ch)
+            px = state.player_to_pixel(offset, cw, ch)
+            item['pixel_pos'] = px
+            if px:
+                item['pixel_estimates'].append(px)
             self._set_log(
                 f'✅ {clean_name(name)} auto-placed — slot {item["grid_index"] + 1}.'
             )
@@ -1104,6 +1243,7 @@ class SurveyApp:
                 (idx, iid) for idx, iid in enumerate(state.route_order)
                 if idx > state.route_idx
                 and not next((i for i in state.items if i['id'] == iid), {}).get('collected')
+                and not next((i for i in state.items if i['id'] == iid), {}).get('skipped')
             ]
             if not remaining:
                 self._set_log('🎉 All survey items collected — surveying complete!')
@@ -1202,6 +1342,7 @@ class SurveyApp:
             f'padding:2px 6px; border-radius:3px; font-size:10px; font-weight:600; }}'
             f'QPushButton:hover {{ border-color: #8ab; }}'
         )
+        self.map_overlay.refresh()
         self.save_settings()
 
     def toggle_inv_lock(self):
@@ -1221,6 +1362,7 @@ class SurveyApp:
                 'padding:2px 6px; border-radius:3px; font-size:10px; font-weight:600; }'
                 'QPushButton:hover { border-color: #8ab; }'
             )
+        self.inv_overlay.refresh()
         self.save_settings()
 
     def toggle_map_labels(self):

@@ -28,7 +28,7 @@ The program relies on chat logs. To enable these, go to the Game Settings, under
 2. Drag the Map and Inventory overlays over you map, and you bags. Both of these should be resizeable windows you can click and drag in the bottom right of their section. The boxes should roughly align with your inventory slots.
 3. Set your survey count (number of maps you are running). Make sure these start in the top left of your inventory and go without any non survey maps inbetween.
 4. Click **📍 Set My Position** and click your character's position on the map overlay to establish the origin.
-5. Click **▶ Start Survey** and begin surveying in-game. Each `[Status] The X is Ym DIR` chat message places a dot on the overlay.
+5. Begin surveying in-game. Each `[Status] The X is Ym DIR` chat message places a dot on the overlay.
 6. On the first area, click it on the map to calibrate the scale. Subsequent dots appear automatically, but can be adjusted by clicking the map.
 7. Use **🗺 Optimize Route** to step through the nearest-neighbour path to collect each item efficiently.
 8. Collect items in-game — they are removed from the inventory grid automatically when the chat log shows `"X collected!"`. Click **→ Skip to Next** to skip a node if necessary.
