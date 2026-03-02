@@ -43,7 +43,9 @@ SLOT_SIZE   = 50          # px
 SLOT_GAP    = 2           # px
 HEADER_H    = 28          # px — header height for both overlays
 
-SETTINGS_PATH = Path(__file__).parent / "survey_tracker_settings.json"
+SETTINGS_PATH = (
+    Path(sys.executable).parent if getattr(sys, 'frozen', False) else Path(__file__).parent
+) / "survey_tracker_settings.json"
 
 _GORGON_CHAT_DEFAULT = (
     Path(os.environ.get('LOCALAPPDATA', '~')).parent
