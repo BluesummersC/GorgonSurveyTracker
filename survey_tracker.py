@@ -21,6 +21,7 @@ import os
 import re
 import json
 import math
+import time
 import ctypes
 from pathlib import Path
 
@@ -439,9 +440,6 @@ class MapOverlay(DragMixin, QWidget):
             p.setBrush(QBrush(QColor(0, 230, 118, 220)))
             p.setPen(QPen(QColor(255, 255, 255, 220), 2))
             p.drawEllipse(int(px) - 7, int(py_s) - 7, 14, 14)
-            p.setPen(QColor(0, 230, 118, 200))
-            p.setFont(QFont('Segoe UI', 7))
-            p.drawText(int(px) - 12, int(py_s) + 10, 'You')
 
         # ── survey dots ──
         p.setFont(QFont('Segoe UI', 8))
@@ -773,9 +771,14 @@ class ControlPanel(QWidget):
         main.setSpacing(7)
 
         # Title row
+        row_title = QHBoxLayout()
         title = QLabel('🗺  Gorgon Survey Tracker')
         title.setStyleSheet('font-size:14px; font-weight:700; color:#9bc;')
-        main.addWidget(title)
+        row_title.addWidget(title)
+        row_title.addStretch()
+        self.btn_overlays = self._small_btn('Overlays: ON', self.app.toggle_overlays, '#1a3a1a')
+        row_title.addWidget(self.btn_overlays)
+        main.addLayout(row_title)
 
         sep = QFrame(); sep.setFrameShape(QFrame.HLine)
         sep.setStyleSheet('color:#334;')
@@ -947,6 +950,16 @@ class ControlPanel(QWidget):
         self.btn_next.setVisible(state.phase == 'routing')
         self.btn_reset.setVisible(has_items or state.phase != 'idle')
 
+        vis = getattr(self.app, '_overlays_visible', True)
+        label = 'ON' if vis else 'OFF'
+        color = '#1a3a1a' if vis else '#5a1a1a'
+        self.btn_overlays.setText(f'Overlays: {label}')
+        self.btn_overlays.setStyleSheet(
+            f'QPushButton {{ background:{color}; color:#cde; border:1px solid #446; '
+            f'padding:2px 6px; border-radius:3px; font-size:10px; font-weight:600; }}'
+            f'QPushButton:hover {{ border-color: #8ab; }}'
+        )
+
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Main Application
@@ -961,11 +974,13 @@ class SurveyApp:
 
         self.map_overlay.canvas_clicked.connect(self._on_map_canvas_click)
 
-        self._chat_dir       = None
-        self._chat_file      = None
-        self._chat_offset    = 0
-        self._click_through  = False
-        self._inv_locked     = False
+        self._chat_dir         = None
+        self._chat_file        = None
+        self._chat_offset      = 0
+        self._collect_last     = {}   # name_low → time.monotonic() of last collection
+        self._click_through    = False
+        self._inv_locked       = False
+        self._overlays_visible = True
 
         # Polling timer (0.5 s)
         self._timer = QTimer()
@@ -1208,20 +1223,28 @@ class SurveyApp:
         state     = self.state
         name_low  = collected_name.lower()
 
+        print(f'[collect] "{collected_name}" | phase={state.phase} | route_idx={state.route_idx}')
+
+        # Deduplicate: ignore repeated collect events for the same name within 3 s.
+        # The game occasionally emits duplicate "X collected!" messages, which would
+        # otherwise consume two consecutive same-named route targets from one pickup.
+        now = time.monotonic()
+        if now - self._collect_last.get(name_low, 0) < 3.0:
+            print(f'[collect]   DEDUP — ignored (same name within 3 s)')
+            return
+        self._collect_last[name_low] = now
+
         # Prefer current route target
         target = None
         if state.phase == 'routing' and state.active_id:
             cur = next((i for i in state.items if i['id'] == state.active_id), None)
+            cur_name = clean_name(cur['name']) if cur else '?'
             if cur and not cur['collected'] and clean_name(cur['name']).lower() == name_low:
                 target = cur
+                print(f'[collect]   matched route target "{cur_name}" (id={state.active_id})')
 
         if not target:
-            target = next(
-                (i for i in state.items
-                 if not i['collected'] and clean_name(i['name']).lower() == name_low),
-                None
-            )
-        if not target:
+            print(f'[collect]   no target found — ignored')
             return
 
         # Move player marker to the collected item's location (you were there to grab it)
@@ -1239,22 +1262,28 @@ class SurveyApp:
         self._set_log(f'✔ {clean_name(target["name"])} collected — removed from inventory.')
 
         if state.phase == 'routing':
-            remaining = [
-                (idx, iid) for idx, iid in enumerate(state.route_order)
-                if idx > state.route_idx
-                and not next((i for i in state.items if i['id'] == iid), {}).get('collected')
-                and not next((i for i in state.items if i['id'] == iid), {}).get('skipped')
-            ]
-            if not remaining:
-                self._set_log('🎉 All survey items collected — surveying complete!')
-                state.phase = 'idle'
+            if target['id'] == state.active_id:
+                # Collected the current route target — advance to the next stop
+                remaining = [
+                    (idx, iid) for idx, iid in enumerate(state.route_order)
+                    if idx > state.route_idx
+                    and not next((i for i in state.items if i['id'] == iid), {}).get('collected')
+                    and not next((i for i in state.items if i['id'] == iid), {}).get('skipped')
+                ]
+                if not remaining:
+                    self._set_log('🎉 All survey items collected — surveying complete!')
+                    state.phase = 'idle'
+                else:
+                    state.route_idx = remaining[0][0]
+                    item = next((i for i in state.items if i['id'] == state.active_id), None)
+                    print(f'[collect]   advanced route_idx → {state.route_idx} (next: "{clean_name(item["name"]) if item else "?"}")')
+                    self._set_log(
+                        f'➡ Next: {clean_name(item["name"]) if item else "?"}'
+                        f' — slot {item["grid_index"] + 1 if item else "?"}'
+                    )
             else:
-                state.route_idx = remaining[0][0]
-                item = next((i for i in state.items if i['id'] == state.active_id), None)
-                self._set_log(
-                    f'➡ Next: {clean_name(item["name"]) if item else "?"}'
-                    f' — slot {item["grid_index"] + 1 if item else "?"}'
-                )
+                cur = next((i for i in state.items if i['id'] == state.active_id), None)
+                print(f'[collect]   out-of-order — route_idx stays at {state.route_idx} (target still "{clean_name(cur["name"]) if cur else "?"}")')
 
         self._refresh_all()
 
@@ -1314,6 +1343,18 @@ class SurveyApp:
     def _clear_flash(self):
         self.map_overlay._flash_item_id = None
         self.map_overlay.refresh()
+
+    # ── overlay visibility ────────────────────────────────────────────────────
+    def toggle_overlays(self):
+        self._overlays_visible = not self._overlays_visible
+        if self._overlays_visible:
+            self.map_overlay.show()
+            self.inv_overlay.show()
+        else:
+            self.map_overlay.hide()
+            self.inv_overlay.hide()
+        self.control.refresh()
+        self.save_settings()
 
     # ── opacity / click-through ───────────────────────────────────────────────
     def set_overlay_opacity(self, which: str, value: int):
@@ -1378,7 +1419,6 @@ class SurveyApp:
         self.map_overlay.refresh()
         self.save_settings()
 
-    # ── settings persistence ──────────────────────────────────────────────────
     def save_settings(self):
         try:
             SETTINGS_PATH.parent.mkdir(parents=True, exist_ok=True)
@@ -1398,11 +1438,35 @@ class SurveyApp:
                 'map_labels':   self.map_overlay._show_labels,
                 'inv_locked':   self._inv_locked,
                 'map_click_through': self._click_through,
+                'overlays_visible': self._overlays_visible,
                 'grid': {
                     'cols':      GRID_COLS,
                     'slot_size': SLOT_SIZE,
                     'slot_gap':  SLOT_GAP,
                 },
+            }
+            st = self.state
+            data['survey_state'] = {
+                'phase':       st.phase if st.phase != 'calibrating' else 'surveying',
+                'player_pos':  list(st.player_pos) if st.player_pos else None,
+                'scale':       st.scale,
+                'next_id':     st._next_id,
+                'route_order': st.route_order,
+                'route_idx':   st.route_idx,
+                'items': [
+                    {
+                        'id':              i['id'],
+                        'name':            i['name'],
+                        'offset':          i['offset'],
+                        'pixel_pos':       list(i['pixel_pos']) if i['pixel_pos'] else None,
+                        'pixel_estimates': [list(e) for e in i['pixel_estimates']],
+                        'grid_index':      i['grid_index'],
+                        'collected':       i['collected'],
+                        'skipped':         i['skipped'],
+                        'route_order':     i['route_order'],
+                    }
+                    for i in st.items
+                ],
             }
             SETTINGS_PATH.write_text(json.dumps(data, indent=2))
         except Exception:
@@ -1475,6 +1539,42 @@ class SurveyApp:
                 self._chat_dir = str(_GORGON_CHAT_DEFAULT)
                 self.control.lbl_file_status.setText('Chat dir (auto)')
 
+            if 'overlays_visible' in data:
+                self._overlays_visible = bool(data['overlays_visible'])
+                if not self._overlays_visible:
+                    self.map_overlay.hide()
+                    self.inv_overlay.hide()
+
+            ss = data.get('survey_state')
+            if ss and (ss.get('items') or ss.get('phase', 'idle') != 'idle'):
+                st = self.state
+                st._next_id    = ss.get('next_id', 0)
+                st.scale       = ss.get('scale')
+                st.player_pos  = tuple(ss['player_pos']) if ss.get('player_pos') else None
+                st.route_order = ss.get('route_order', [])
+                st.route_idx   = ss.get('route_idx', -1)
+                items = []
+                for d in ss.get('items', []):
+                    items.append({
+                        'id':              d['id'],
+                        'name':            d['name'],
+                        'offset':          d['offset'],
+                        'pixel_pos':       tuple(d['pixel_pos']) if d.get('pixel_pos') else None,
+                        'pixel_estimates': [tuple(e) for e in d.get('pixel_estimates', [])],
+                        'grid_index':      d['grid_index'],
+                        'collected':       d['collected'],
+                        'skipped':         d.get('skipped', False),
+                        'route_order':     d.get('route_order', -1),
+                    })
+                st.items = items
+                phase = ss.get('phase', 'idle')
+                if phase == 'set_player' and st.player_pos is None:
+                    phase = 'idle'
+                st.phase = phase
+                # Refresh overlays directly (not via _refresh_all) to avoid a redundant save
+                self.map_overlay.refresh()
+                self.inv_overlay.refresh()
+
         except Exception:
             pass
 
@@ -1486,6 +1586,7 @@ class SurveyApp:
         self.map_overlay.refresh()
         self.inv_overlay.refresh()
         self.control.refresh()
+        self.save_settings()
 
 
 # ─────────────────────────────────────────────────────────────────────────────
