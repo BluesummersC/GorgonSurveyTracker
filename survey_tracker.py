@@ -569,7 +569,8 @@ class MapOverlay(DragMixin, QWidget):
         p.drawRoundedRect(0, 0, w - 1, h - 1, 5, 5)
 
         # ── route lines ──
-        if self.state.phase == 'routing' and len(self.state.route_order) >= 1:
+        if (self.app._route_lines_visible
+                and self.state.phase == 'routing' and len(self.state.route_order) >= 1):
             pen = QPen(QColor(255, 210, 50, 210), 2.5, Qt.DashLine)
             pen.setDashPattern([6, 3])
             p.setPen(pen)
@@ -590,7 +591,7 @@ class MapOverlay(DragMixin, QWidget):
             py_s = py_ + cy
             p.setBrush(QBrush(QColor(0, 230, 118, 220)))
             p.setPen(QPen(QColor(255, 255, 255, 220), 2))
-            p.drawEllipse(int(px) - 7, int(py_s) - 7, 14, 14)
+            p.drawEllipse(int(px) - 5, int(py_s) - 5, 10, 10)
 
         # ── survey dots ──
         p.setFont(QFont('Segoe UI', 8))
@@ -680,7 +681,7 @@ class MapOverlay(DragMixin, QWidget):
             col = pos_colors[i]
             p.setBrush(QBrush(col))
             p.setPen(QPen(QColor(255, 255, 255, 180), 1.5))
-            p.drawRect(int(px_) - 6, int(py_s) - 6, 12, 12)
+            p.drawRect(int(px_) - 5, int(py_s) - 5, 10, 10)
             p.setPen(col)
             p.setFont(QFont('Segoe UI', 7, QFont.Bold))
             p.drawText(int(px_) + 8, int(py_s) + 4, pos_labels[i])
@@ -702,7 +703,7 @@ class MapOverlay(DragMixin, QWidget):
         active_id = state.ml_active_id
 
         # ── Route lines (dashed yellow, last position → estimated targets in order) ──
-        if state.ml_route_order and state.ml_positions:
+        if self.app._route_lines_visible and state.ml_route_order and state.ml_positions:
             pen = QPen(QColor(255, 210, 50, 210), 2.5, Qt.DashLine)
             pen.setDashPattern([6, 3])
             p.setPen(pen)
@@ -1158,6 +1159,10 @@ class ControlPanel(QWidget):
         title.setStyleSheet('font-size:14px; font-weight:700; color:#9bc;')
         row_title.addWidget(title)
         row_title.addStretch()
+        self.btn_labels      = self._small_btn('Labels: ON', self.app.toggle_map_labels, '#1a2a3a')
+        row_title.addWidget(self.btn_labels)
+        self.btn_route_lines = self._small_btn('Route: ON', self.app.toggle_route_lines, '#1a2a3a')
+        row_title.addWidget(self.btn_route_lines)
         self.btn_overlays = self._small_btn('Overlays: ON', self.app.toggle_overlays, '#1a3a1a')
         row_title.addWidget(self.btn_overlays)
         main.addLayout(row_title)
@@ -1300,10 +1305,6 @@ class ControlPanel(QWidget):
         self.btn_inv_lock = self._small_btn('Inv: Unlocked',
                                             self.app.toggle_inv_lock, '#1a3a1a')
         row4.addWidget(self.btn_inv_lock)
-        row4.addSpacing(4)
-        self.btn_labels = self._small_btn('Labels: ON',
-                                          self.app.toggle_map_labels, '#1a2a3a')
-        row4.addWidget(self.btn_labels)
         row4.addStretch()
         sec.addLayout(row4)
 
@@ -1419,6 +1420,25 @@ class ControlPanel(QWidget):
             self.btn_ml_skip.setVisible(in_routing)
             self.btn_ml_skip.setEnabled(has_more)
 
+        lbl_on = getattr(self.app.map_overlay, '_show_labels', True)
+        lbl_color = '#1a2a3a' if lbl_on else '#5a1a1a'
+        self.btn_labels.setText(f'Labels: {"ON" if lbl_on else "OFF"}')
+        self.btn_labels.setStyleSheet(
+            f'QPushButton {{ background:{lbl_color}; color:#cde; border:1px solid #446; '
+            f'padding:2px 6px; border-radius:3px; font-size:10px; font-weight:600; }}'
+            f'QPushButton:hover {{ border-color: #8ab; }}'
+        )
+
+        rl = getattr(self.app, '_route_lines_visible', True)
+        rl_label = 'ON' if rl else 'OFF'
+        rl_color  = '#1a2a3a' if rl else '#5a1a1a'
+        self.btn_route_lines.setText(f'Route: {rl_label}')
+        self.btn_route_lines.setStyleSheet(
+            f'QPushButton {{ background:{rl_color}; color:#cde; border:1px solid #446; '
+            f'padding:2px 6px; border-radius:3px; font-size:10px; font-weight:600; }}'
+            f'QPushButton:hover {{ border-color: #8ab; }}'
+        )
+
         vis = getattr(self.app, '_overlays_visible', True)
         label = 'ON' if vis else 'OFF'
         color = '#1a3a1a' if vis else '#5a1a1a'
@@ -1450,7 +1470,8 @@ class SurveyApp:
         self._ml_collect_last  = 0.0  # time.monotonic() of last motherlode collection
         self._click_through    = False
         self._inv_locked       = False
-        self._overlays_visible = True
+        self._overlays_visible  = True
+        self._route_lines_visible = True
 
         # Polling timer (0.5 s)
         self._timer = QTimer()
@@ -2065,6 +2086,12 @@ class SurveyApp:
         self.map_overlay.refresh()
 
     # ── overlay visibility ────────────────────────────────────────────────────
+    def toggle_route_lines(self):
+        self._route_lines_visible = not self._route_lines_visible
+        self.map_overlay.refresh()
+        self.control.refresh()
+        self.save_settings()
+
     def toggle_overlays(self):
         self._overlays_visible = not self._overlays_visible
         if self._overlays_visible:
@@ -2130,15 +2157,8 @@ class SurveyApp:
 
     def toggle_map_labels(self):
         self.map_overlay._show_labels = not self.map_overlay._show_labels
-        label = 'ON' if self.map_overlay._show_labels else 'OFF'
-        color = '#1a2a3a' if self.map_overlay._show_labels else '#2a2a2a'
-        self.control.btn_labels.setText(f'Labels: {label}')
-        self.control.btn_labels.setStyleSheet(
-            f'QPushButton {{ background:{color}; color:#cde; border:1px solid #446; '
-            f'padding:2px 6px; border-radius:3px; font-size:10px; font-weight:600; }}'
-            f'QPushButton:hover {{ border-color: #8ab; }}'
-        )
         self.map_overlay.refresh()
+        self.control.refresh()
         self.save_settings()
 
     def save_settings(self):
@@ -2160,7 +2180,8 @@ class SurveyApp:
                 'map_labels':   self.map_overlay._show_labels,
                 'inv_locked':   self._inv_locked,
                 'map_click_through': self._click_through,
-                'overlays_visible': self._overlays_visible,
+                'overlays_visible':     self._overlays_visible,
+                'route_lines_visible':  self._route_lines_visible,
                 'grid': {
                     'cols':      GRID_COLS,
                     'slot_size': SLOT_SIZE,
@@ -2248,8 +2269,6 @@ class SurveyApp:
 
             if 'map_labels' in data:
                 self.map_overlay._show_labels = bool(data['map_labels'])
-                label = 'ON' if self.map_overlay._show_labels else 'OFF'
-                self.control.btn_labels.setText(f'Labels: {label}')
 
             if 'inv_locked' in data:
                 self._inv_locked = bool(data['inv_locked'])
@@ -2281,6 +2300,9 @@ class SurveyApp:
             elif _GORGON_CHAT_DEFAULT.is_dir():
                 self._chat_dir = str(_GORGON_CHAT_DEFAULT)
                 self.control.lbl_file_status.setText('Chat dir (auto)')
+
+            if 'route_lines_visible' in data:
+                self._route_lines_visible = bool(data['route_lines_visible'])
 
             if 'overlays_visible' in data:
                 self._overlays_visible = bool(data['overlays_visible'])
