@@ -38,7 +38,33 @@ The program relies on chat logs. To enable these, go to the Game Settings, under
 
 ## Usage (Motherlode)
 
-1. Coming in a future update!
+Motherlode surveys give only a raw distance (`The treasure is 2733 meters from here`) with no bearing. The tracker uses three surveying positions to trilaterate each treasure's location.
+
+### Setup
+
+1. Click **Motherlode Survey** in the control panel to switch modes. The regular survey controls are replaced with motherlode controls.
+2. Make sure your ChatLogs folder is set (same as Normal Surveys).
+
+### Surveying (3 rounds)
+
+3. Click your current position on the map overlay. The status label will confirm **Position 1 set**.
+4. In-game, use the survey tool to scan every motherlode in the area. Each `The treasure is X meters from here` message is recorded automatically — the inventory overlay fills up with slots as distances arrive.
+5. When you have scanned all motherlodes from Position 1, click **Next Position** in the control panel.
+6. Walk to a new location (ideally not in a straight line from Position 1), click the map to set **Position 2**, then scan all motherlodes again and click **Next Position**.
+7. Repeat for **Position 3**.
+
+> **Important:** The three positions you click on the map must be placed with **proportionally correct spacing** relative to each other. If you walked twice as far between P1→P2 as between P2→P3, the canvas clicks should reflect that ratio. Use in-game landmarks or known distances as a guide.
+
+> **Tip:** Scan motherlodes in the same order each round — the tracker matches distances positionally (first distance = Treasure 1, second = Treasure 2, etc.).
+
+### Collecting
+
+8. After round 3, the tracker automatically computes the scale and trilaterated locations. Estimated positions appear as coloured dots on the map overlay, and a dashed route line guides you through them in an optimised order.
+9. Collect each motherlode in-game. The `X Metal Slab added to inventory` message triggers automatic progression — the collected slot disappears from the inventory, the player marker moves to that location, and the next target is highlighted.
+10. Click **Skip** to skip the current target and advance to the next one if needed.
+11. Click **Reset Motherlode** to start a fresh survey run.
+
+> **Tip:** The computed pixel/metre scale is shown in the control panel after trilateration. A fit quality warning appears if the estimated circles don't converge well — this usually means the three positions weren't placed proportionally, or you dont have enough samples to computer well.
 
 ## Build Requirements
 

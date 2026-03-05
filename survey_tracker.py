@@ -70,6 +70,8 @@ APP_VERSION = _ver_file.read_text().strip() if _ver_file.exists() else "dev"
 _DIST_RE         = re.compile(r'(\d+(?:\.\d+)?)m\s+(west|east|north|south)', re.IGNORECASE)
 _COLLECT_RE      = re.compile(r'\[Status\]\s+(.+?)\s+collected!')
 _SURVEY_CHAT_RE  = re.compile(r'\[Status\]\s+The\s+(.+?)\s+is\s+(.+)', re.IGNORECASE)
+_ML_DIST_RE      = re.compile(r'\[Status\]\s+The treasure is (\d+(?:\.\d+)?) meters from here\.', re.IGNORECASE)
+_ML_COLLECT_RE   = re.compile(r'\[Status\]\s+(?:.+?) Metal Slab x\d+ added to inventory\.', re.IGNORECASE)
 
 
 def parse_chat_survey_line(line: str):
@@ -97,12 +99,116 @@ def parse_collect_line(line: str):
     return m.group(1).strip() if m else None
 
 
+def parse_ml_dist_line(line: str):
+    """Return float distance in metres from a motherlode survey line, or None."""
+    m = _ML_DIST_RE.search(line)
+    return float(m.group(1)) if m else None
+
+
+def parse_ml_collect_line(line: str) -> bool:
+    """Return True if line is a motherlode Metal Slab collection event."""
+    return bool(_ML_COLLECT_RE.search(line))
+
+
 def clean_name(name: str) -> str:
     return re.sub(r'\s+(is here|found)[.!]?\s*$', '', name, flags=re.IGNORECASE).strip()
 
 
 def pt_dist(a, b):
     return math.sqrt((a[0] - b[0]) ** 2 + (a[1] - b[1]) ** 2)
+
+
+def trilaterate(p1, r1, p2, r2, p3, r3):
+    """Find intersection point of 3 circles (centres in pixels, radii in pixels).
+
+    Subtracts circle equations pairwise to form two linear equations, then
+    solves the 2×2 system analytically.
+    Returns (x, y) or None if positions are collinear (|det| < 1e-6).
+    """
+    x1, y1 = p1;  x2, y2 = p2;  x3, y3 = p3
+    A1 = 2 * (x2 - x1);  B1 = 2 * (y2 - y1)
+    C1 = r1*r1 - r2*r2 - x1*x1 + x2*x2 - y1*y1 + y2*y2
+    A2 = 2 * (x3 - x1);  B2 = 2 * (y3 - y1)
+    C2 = r1*r1 - r3*r3 - x1*x1 + x3*x3 - y1*y1 + y3*y3
+    det = A1 * B2 - A2 * B1
+    if abs(det) < 1e-6:
+        return None
+    return ((C1 * B2 - C2 * B1) / det,
+            (A1 * C2 - A2 * C1) / det)
+
+
+def ml_solve_scale(positions, surveys):
+    """Analytically derive px/metre scale from motherlode circle convergence.
+
+    For each motherlode the trilateration result T_j = (s²·αx+βx, s²·αy+βy).
+    Substituting back into circle-1's equation gives Pj·u² + Qj·u + Rj = 0
+    where u = s².  Summing over all motherlodes gives one quadratic in u.
+
+    Returns positive float scale, or None if the solve fails / is implausible.
+    Requires positions to be placed with proportionally correct pixel spacing.
+    """
+    if len(positions) < 3:
+        return None
+    p1, p2, p3 = positions[0], positions[1], positions[2]
+    A1 = 2*(p2[0]-p1[0]);  B1 = 2*(p2[1]-p1[1])
+    A2 = 2*(p3[0]-p1[0]);  B2 = 2*(p3[1]-p1[1])
+    det = A1*B2 - A2*B1
+    if abs(det) < 1e-6:
+        return None
+
+    P_tot = Q_tot = R_tot = 0.0
+    valid = 0
+    for entry in surveys:
+        dsts = entry['distances']
+        if len(dsts) < 3:
+            continue
+        d1, d2, d3 = dsts[0], dsts[1], dsts[2]
+        if d1 == 0 or d2 == 0 or d3 == 0:
+            continue
+
+        K1 = d1*d1 - d2*d2
+        L1 = p2[0]*p2[0] - p1[0]*p1[0] + p2[1]*p2[1] - p1[1]*p1[1]
+        K2 = d1*d1 - d3*d3
+        L2 = p3[0]*p3[0] - p1[0]*p1[0] + p3[1]*p3[1] - p1[1]*p1[1]
+
+        ax = (K1*B2 - K2*B1) / det
+        bx = (L1*B2 - L2*B1) / det
+        ay = (A1*K2 - A2*K1) / det
+        by = (A1*L2 - A2*L1) / det
+
+        gx = bx - p1[0]
+        gy = by - p1[1]
+
+        P_tot += ax*ax + ay*ay
+        Q_tot += 2*(ax*gx + ay*gy) - d1*d1
+        R_tot += gx*gx + gy*gy
+        valid += 1
+
+    if valid == 0:
+        return None
+
+    # Solve P_tot·u² + Q_tot·u + R_tot = 0  (u = s²)
+    if abs(P_tot) < 1e-12:
+        if abs(Q_tot) < 1e-12:
+            return None
+        u = -R_tot / Q_tot
+        candidates = [u] if u > 1e-6 else []
+    else:
+        disc = Q_tot*Q_tot - 4*P_tot*R_tot
+        if disc < 0:
+            return None
+        sq = math.sqrt(disc)
+        candidates = [u for u in ((-Q_tot + sq) / (2*P_tot),
+                                   (-Q_tot - sq) / (2*P_tot)) if u > 1e-6]
+
+    if not candidates:
+        return None
+
+    # Pick the root that gives the most plausible scale (0.05 – 200 px/m)
+    plausible = [math.sqrt(u) for u in candidates if 0.0025 <= u <= 40000]
+    if not plausible:
+        return None
+    return plausible[0]
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -140,6 +246,37 @@ class SurveyState:
         self.route_idx     = -1
         self._next_id      = 0
         self.survey_count  = 0        # 0 = show only found items; >0 = user-set total
+
+        # ── Motherlode mode ───────────────────────────────────────────────
+        self.ml_mode        = False     # True = motherlode mode active
+        self.ml_round       = 0         # 0/1/2 — which round is being collected
+        self.ml_phase       = 'set_pos' # 'set_pos' | 'survey'
+        self.ml_positions   = []        # [(px,py), ...] canvas coords per committed round
+        self.ml_surveys     = []        # [{id, distances, estimated_pos, collected, route_order}, ...]
+        self.ml_pending     = []        # distances gathered this round (uncommitted)
+        self._ml_next_id    = 0
+        self.ml_route_order = []        # entry ids in optimised order (after trilateration)
+        self.ml_route_idx   = -1        # current position in route
+
+    def ml_add_entry(self):
+        """Append a blank motherlode entry and return it."""
+        self._ml_next_id += 1
+        entry = {
+            'id':            self._ml_next_id,
+            'distances':     [],
+            'estimated_pos': None,
+            'collected':     False,
+            'route_order':   -1,
+        }
+        self.ml_surveys.append(entry)
+        return entry
+
+    @property
+    def ml_active_id(self):
+        if (self.ml_round >= 3
+                and 0 <= self.ml_route_idx < len(self.ml_route_order)):
+            return self.ml_route_order[self.ml_route_idx]
+        return None
 
     def add_item(self, name, offset):
         self._next_id += 1
@@ -474,6 +611,10 @@ class MapOverlay(DragMixin, QWidget):
                    else 'Click to place survey dot (calibrate scale)'
             p.drawText(4, h - 6, hint)
 
+        # ── motherlode overlay ──
+        if self.state.ml_mode:
+            self._draw_ml_overlay(p, cy)
+
     def _draw_dot(self, p, dx, dy, kind, item):
         DOT_R = 4
         colours = {
@@ -507,6 +648,101 @@ class MapOverlay(DragMixin, QWidget):
         by = int(dy) + DOT_R + 1
         p.fillRect(bx - 2, by, tw + 4, fm.height(), QColor(0, 0, 0, 110))
         p.drawText(bx, by + fm.ascent(), label)
+
+    _ML_HUES = [0, 30, 60, 120, 180, 210, 270, 300]
+
+    def _draw_ml_overlay(self, p, cy):
+        state = self.state
+        w, h  = self.width(), self.height()
+
+        pos_colors = [QColor(220, 60, 60, 220),
+                      QColor(60, 100, 220, 220),
+                      QColor(60, 200, 80, 220)]
+        pos_labels = ['P1', 'P2', 'P3']
+        # ── Always draw position markers (visible even before scale is known) ──
+        for i, pos in enumerate(state.ml_positions):
+            px_, py_ = pos
+            py_s = py_ + cy
+            col = pos_colors[i]
+            p.setBrush(QBrush(col))
+            p.setPen(QPen(QColor(255, 255, 255, 180), 1.5))
+            p.drawRect(int(px_) - 6, int(py_s) - 6, 12, 12)
+            p.setPen(col)
+            p.setFont(QFont('Segoe UI', 7, QFont.Bold))
+            p.drawText(int(px_) + 8, int(py_s) + 4, pos_labels[i])
+
+        # ── Cursor hint ──
+        if state.ml_phase == 'set_pos' and state.ml_round < 3:
+            p.setPen(QColor(255, 200, 60, 180))
+            p.setFont(QFont('Segoe UI', 8))
+            p.drawText(4, h - 6, f'Click map to set Position {state.ml_round + 1}')
+
+        # ── Estimated positions require scale ──
+        if not state.scale:
+            p.setPen(QColor(255, 140, 0, 200))
+            p.setFont(QFont('Segoe UI', 8))
+            p.drawText(4, h - (22 if state.ml_phase == 'set_pos' and state.ml_round < 3 else 6),
+                       'Awaiting scale… (auto-computed after round 3)')
+            return
+
+        active_id = state.ml_active_id
+
+        # ── Route lines (dashed yellow, last position → estimated targets in order) ──
+        if state.ml_route_order and state.ml_positions:
+            pen = QPen(QColor(255, 210, 50, 210), 2.5, Qt.DashLine)
+            pen.setDashPattern([6, 3])
+            p.setPen(pen)
+            pts = []
+            start = state.player_pos or (state.ml_positions[-1] if state.ml_positions else None)
+            if start:
+                pts.append((start[0], start[1] + cy))
+            for eid in state.ml_route_order:
+                entry = next((e for e in state.ml_surveys if e['id'] == eid), None)
+                if entry and entry.get('estimated_pos') and not entry['collected']:
+                    ex_, ey_ = entry['estimated_pos']
+                    pts.append((ex_, ey_ + cy))
+            for i in range(len(pts) - 1):
+                x1, y1 = pts[i];  x2, y2 = pts[i + 1]
+                p.drawLine(int(x1), int(y1), int(x2), int(y2))
+
+        # ── Estimated position dots ──
+        p.setFont(QFont('Segoe UI', 8))
+        for e_idx, entry in enumerate(state.ml_surveys):
+            ep = entry.get('estimated_pos')
+            if not ep:
+                continue
+            ex_, ey_ = ep
+            ey_s = ey_ + cy
+            is_active = (entry['id'] == active_id)
+
+            if entry['collected']:
+                dot_col  = QColor(120, 120, 120, 70)
+                dot_pen  = QColor(120, 120, 120, 80)
+                dot_r    = 5
+            elif is_active:
+                dot_col  = QColor(255, 82, 82, 230)
+                dot_pen  = QColor(255, 255, 255, 200)
+                dot_r    = 7
+            else:
+                hue      = self._ML_HUES[e_idx % len(self._ML_HUES)]
+                dot_col  = QColor.fromHsv(hue, 220, 240, 210)
+                dot_pen  = QColor(255, 255, 255, 180)
+                dot_r    = 6
+
+            p.setBrush(QBrush(dot_col))
+            p.setPen(QPen(dot_pen, 1.5))
+            p.drawEllipse(int(ex_) - dot_r, int(ey_s) - dot_r,
+                          dot_r * 2, dot_r * 2)
+
+            if self._show_labels and not entry['collected']:
+                order_str = (f'{entry["route_order"] + 1}. ' if entry.get('route_order', -1) >= 0 else '')
+                label = f'{order_str}Treasure {entry["id"]}'
+                p.setPen(QColor(220, 220, 180, 200))
+                fm = p.fontMetrics()
+                tw = fm.horizontalAdvance(label)
+                p.fillRect(int(ex_) - tw // 2 - 2, int(ey_s) + dot_r + 1,
+                           tw + 4, fm.height(), QColor(0, 0, 0, 130))
+                p.drawText(int(ex_) - tw // 2, int(ey_s) + dot_r + 1 + fm.ascent(), label)
 
     def resizeEvent(self, event):
         super().resizeEvent(event)
@@ -543,6 +779,88 @@ class MapOverlay(DragMixin, QWidget):
 # ─────────────────────────────────────────────────────────────────────────────
 # Inventory slot widget
 # ─────────────────────────────────────────────────────────────────────────────
+class MlSlotWidget(QFrame):
+    """Slot widget for a single motherlode entry in the inventory overlay."""
+
+    def __init__(self, entry=None, pending_dist=None, slot_num=1, is_active=False, parent=None):
+        super().__init__(parent)
+        self._entry       = entry        # committed survey dict or None
+        self._pending     = pending_dist  # float distance from current round, or None
+        self._slot_num    = slot_num
+        self._is_active   = is_active
+        self.setFrameShape(QFrame.NoFrame)
+
+    def paintEvent(self, _event):
+        p = QPainter(self)
+        p.setRenderHint(QPainter.Antialiasing)
+        w, h = self.width(), self.height()
+
+        entry     = self._entry
+        collected = entry['collected'] if entry else False
+        n_committed = len(entry['distances']) if entry else 0
+        has_pending = self._pending is not None
+        is_new      = (entry is None and has_pending)  # first-round, not yet committed
+
+        # Background + border
+        if collected:
+            p.fillRect(0, 0, w, h, QColor(20, 20, 20, 180))
+            p.setPen(QPen(QColor(100, 100, 100, 100), 1))
+        elif self._is_active:
+            p.fillRect(0, 0, w, h, QColor(60, 45, 5, 200))
+            p.setPen(QPen(QColor(255, 193, 7, 200), 2))    # gold = active route target
+        elif is_new:
+            p.fillRect(0, 0, w, h, QColor(35, 25, 12, 200))
+            p.setPen(QPen(QColor(255, 200, 60, 160), 1))   # gold = uncommitted
+        else:
+            p.fillRect(0, 0, w, h, QColor(35, 25, 12, 200))
+            p.setPen(QPen(QColor(100, 170, 255, 150), 1))
+        p.drawRoundedRect(0, 0, w - 1, h - 1, 2, 2)
+
+        # "T{N}" label
+        text_col = QColor(80, 80, 80) if collected else QColor(220, 200, 160)
+        p.setPen(text_col)
+        p.setFont(QFont('Segoe UI', 7, QFont.Bold))
+        p.drawText(2, 2, w - 4, h // 2, Qt.AlignTop | Qt.AlignHCenter,
+                   f'T{self._slot_num}')
+
+        # Most recent distance
+        all_dists = (entry['distances'] if entry else []) + \
+                    ([self._pending] if has_pending else [])
+        if all_dists:
+            p.setPen(QColor(80, 80, 80) if collected else QColor(150, 210, 160))
+            p.setFont(QFont('Segoe UI', 6))
+            p.drawText(2, h // 2 - 2, w - 4, h // 2,
+                       Qt.AlignTop | Qt.AlignHCenter, f'{all_dists[-1]:.0f}m')
+
+        # Round indicator dots (3 dots along bottom)
+        dot_r   = 2
+        dot_y   = h - 6
+        spacing = (w - 8) / 3
+        for i in range(3):
+            dot_x = int(4 + spacing * i + spacing / 2)
+            if i < n_committed:
+                col = QColor(100, 200, 100, 80 if collected else 200)
+            elif i == n_committed and has_pending:
+                col = QColor(255, 200, 60, 200)  # gold = in-progress
+            else:
+                col = QColor(60, 60, 60, 180)
+            p.setBrush(QBrush(col))
+            p.setPen(Qt.NoPen)
+            p.drawEllipse(dot_x - dot_r, dot_y - dot_r, dot_r * 2, dot_r * 2)
+
+        # Top-right: route order number if assigned, else ✓ for estimated
+        if not collected:
+            ro = entry.get('route_order', -1) if entry else -1
+            if ro >= 0:
+                p.setPen(QColor(255, 193, 7, 220))
+                p.setFont(QFont('Segoe UI', 7, QFont.Bold))
+                p.drawText(0, 2, w - 3, 14, Qt.AlignRight, str(ro + 1))
+            elif entry and entry.get('estimated_pos'):
+                p.setPen(QColor(100, 220, 100, 200))
+                p.setFont(QFont('Segoe UI', 7, QFont.Bold))
+                p.drawText(0, 2, w - 3, 14, Qt.AlignRight, '\u2713')
+
+
 class SlotWidget(QFrame):
     clicked = pyqtSignal(object)   # emits item dict
 
@@ -659,6 +977,10 @@ class InventoryOverlay(DragMixin, QWidget):
                 w.deleteLater()
         self._slots.clear()
 
+        if self.state.ml_mode:
+            self._rebuild_ml_grid()
+            return
+
         uncollected = self.state.uncollected()
         active_id   = self.state.active_id
 
@@ -681,6 +1003,41 @@ class InventoryOverlay(DragMixin, QWidget):
             self._grid_layout.addWidget(slot, row, col)
             self._slots.append(slot)
 
+    def _rebuild_ml_grid(self):
+        """Render slot-per-motherlode grid, including current round's pending distances."""
+        state       = self.state
+        surveys     = state.ml_surveys
+        pending     = state.ml_pending
+        n_committed = len(surveys)
+        n_pending   = len(pending)
+        n_total     = max(n_committed, n_pending)
+
+        if n_total == 0:
+            lbl = QLabel('Scan motherlodes to see them here.')
+            lbl.setStyleSheet('color:#556; font-size:11px; padding:4px;')
+            self._grid_layout.addWidget(lbl, 0, 0)
+            return
+
+        slot_w = max(28, (self.width() - 12 - SLOT_GAP * (GRID_COLS - 1)) // GRID_COLS)
+
+        # After trilateration, hide collected entries like regular survey does
+        if state.ml_round >= 3:
+            surveys = [e for e in surveys if not e.get('collected')]
+            n_committed = len(surveys)
+            n_total = max(n_committed, n_pending)
+
+        active_id = self.state.ml_active_id
+        for i in range(n_total):
+            entry        = surveys[i]   if i < n_committed else None
+            pending_dist = pending[i]   if i < n_pending   else None
+            is_active    = entry is not None and entry['id'] == active_id
+            slot_num     = entry['id'] if entry else i + 1
+            slot = MlSlotWidget(entry, pending_dist, slot_num, is_active, self._grid_container)
+            slot.setFixedSize(slot_w, slot_w)
+            row, col = divmod(i, GRID_COLS)
+            self._grid_layout.addWidget(slot, row, col)
+            self._slots.append(slot)
+
     def paintEvent(self, _event):
         p = QPainter(self)
         p.setRenderHint(QPainter.Antialiasing)
@@ -693,7 +1050,8 @@ class InventoryOverlay(DragMixin, QWidget):
         p.fillRect(0, 0, w, HEADER_H, QColor(0, 0, 0, 185))
         p.setPen(QColor(180, 200, 220))
         p.setFont(QFont('Segoe UI', 9, QFont.Bold))
-        p.drawText(8, 0, w - 30, HEADER_H, Qt.AlignVCenter, 'Survey Inventory')
+        title = 'Motherlode Survey' if self.state.ml_mode else 'Survey Inventory'
+        p.drawText(8, 0, w - 30, HEADER_H, Qt.AlignVCenter, title)
 
         # lock / inventory-locked indicator
         _draw_lock_icon(p, w - 14, HEADER_H // 2, self.app._inv_locked)
@@ -764,6 +1122,14 @@ class ControlPanel(QWidget):
         lb.setStyleSheet(f'color:{color}; font-size:11px;')
         return lb
 
+    def _btn_style(self, bg: str) -> str:
+        return (
+            f'QPushButton {{ background:{bg}; color:#cde; border:1px solid #446; '
+            f'padding:5px 10px; border-radius:4px; font-size:12px; font-weight:600; }}'
+            f'QPushButton:hover {{ background: #2a4a8a; }}'
+            f'QPushButton:disabled {{ background:#222; color:#555; }}'
+        )
+
     def _build_ui(self):
         self.setStyleSheet('QWidget { background:#0e0e1e; color:#cde; }')
         main = QVBoxLayout(self)
@@ -783,6 +1149,15 @@ class ControlPanel(QWidget):
         sep = QFrame(); sep.setFrameShape(QFrame.HLine)
         sep.setStyleSheet('color:#334;')
         main.addWidget(sep)
+
+        # ── Mode toggle ────────────────────────────────────────────────────
+        row_mode = QHBoxLayout()
+        self.btn_mode_regular = self._btn('Regular Survey',    self.app.exit_ml_mode,  '#1a3a6a')
+        self.btn_mode_ml      = self._btn('Motherlode Survey', self.app.enter_ml_mode, '#4a1a4a')
+        row_mode.addWidget(self.btn_mode_regular)
+        row_mode.addWidget(self.btn_mode_ml)
+        row_mode.addStretch()
+        main.addLayout(row_mode)
 
         # ── Files row ──────────────────────────────────────────────────────
         row = QHBoxLayout()
@@ -816,13 +1191,15 @@ class ControlPanel(QWidget):
         row2.addStretch()
         sec.addLayout(row2)
 
-        # ── Survey controls ───────────────────────────────────────────────
-        row3 = QHBoxLayout()
-        row3.addWidget(self._label('Surveys:'))
+        # ── Survey controls (regular mode) ───────────────────────────────
+        self._regular_controls = QWidget()
+        rc_layout = QHBoxLayout(self._regular_controls)
+        rc_layout.setContentsMargins(0, 0, 0, 0)
+        rc_layout.addWidget(self._label('Surveys:'))
         self.sb_count = QSpinBox()
         self.sb_count.setRange(0, 999)
         self.sb_count.setValue(0)
-        self.sb_count.setSpecialValueText('0')   # 0 displays as "—" meaning "auto"
+        self.sb_count.setSpecialValueText('0')
         self.sb_count.setToolTip('How many survey maps you have (0 = auto grow with matches surveys)')
         self.sb_count.setMaximumWidth(60)
         self.sb_count.setStyleSheet(
@@ -831,16 +1208,45 @@ class ControlPanel(QWidget):
             'QSpinBox::up-button, QSpinBox::down-button { width:14px; }'
         )
         self.sb_count.valueChanged.connect(self.app.on_survey_count_changed)
-        row3.addWidget(self.sb_count)
+        rc_layout.addWidget(self.sb_count)
         self.btn_set_pos = self._btn('📍 Set My Position', self.app.enter_set_player, '#1a4a2a')
         self.btn_start   = self._btn('▶ Start Survey',     self.app.start_surveying,  '#1a3a5a')
         self.btn_done    = self._btn('🗺 Optimize Route',   self.app.done_surveying,   '#5a4a00')
         self.btn_next    = self._btn('→ Skip to Next',      self.app.advance_route,    '#1a3a5a')
         self.btn_reset   = self._btn('🗑 Reset',            self.app.reset_survey,     '#5a1a1a')
         for b in (self.btn_set_pos, self.btn_start, self.btn_done, self.btn_next, self.btn_reset):
-            row3.addWidget(b)
-        row3.addStretch()
-        sec.addLayout(row3)
+            rc_layout.addWidget(b)
+        rc_layout.addStretch()
+        sec.addWidget(self._regular_controls)
+
+        # ── Motherlode controls (shown only in motherlode mode) ───────────
+        self._ml_section = QWidget()
+        ml_layout = QVBoxLayout(self._ml_section)
+        ml_layout.setContentsMargins(0, 0, 0, 0)
+        ml_layout.setSpacing(4)
+
+        self.lbl_ml_status = self._label('Round 1: Click map to set Position 1', '#bc8')
+        ml_layout.addWidget(self.lbl_ml_status)
+
+        row_ml = QHBoxLayout()
+        self.lbl_ml_count = self._label('0 distances this round', '#556')
+        row_ml.addWidget(self.lbl_ml_count)
+        self.btn_ml_next  = self._btn('Next Position', self.app.ml_next_position, '#2a2a5a')
+        row_ml.addWidget(self.btn_ml_next)
+        self.btn_ml_skip  = self._btn('Skip', self.app.ml_skip_next, '#2a3a2a')
+        self.btn_ml_skip.setVisible(False)
+        row_ml.addWidget(self.btn_ml_skip)
+        self.btn_ml_reset = self._btn('Reset Motherlode', self.app.reset_ml, '#5a1a1a')
+        row_ml.addWidget(self.btn_ml_reset)
+        row_ml.addStretch()
+        ml_layout.addLayout(row_ml)
+
+        self.lbl_ml_scale = self._label('Scale: pending', '#556')
+        self.lbl_ml_fit   = self._label('', '#f80')
+        ml_layout.addWidget(self.lbl_ml_scale)
+        ml_layout.addWidget(self.lbl_ml_fit)
+
+        sec.addWidget(self._ml_section)
 
         # ── Opacity (stacked) + toggle buttons ───────────────────────────
         slider_col = QVBoxLayout()
@@ -928,6 +1334,7 @@ class ControlPanel(QWidget):
             f'{active} active{f", {done} collected" if done else ""}' if total else '0 items'
         )
 
+        ml           = state.ml_mode
         has_items    = bool(state.items)
         has_pos      = state.player_pos is not None
         has_chat_dir = getattr(self.app, '_chat_dir', None) is not None
@@ -938,17 +1345,63 @@ class ControlPanel(QWidget):
         if has_chat_dir != was_visible:
             self.adjustSize()
 
-        self.btn_set_pos.setVisible(
-            state.phase not in ('routing',) and (not has_pos or state.phase == 'set_player')
-        )
-        self.btn_start.setVisible(
-            state.phase == 'idle' and has_pos and has_chat_dir
-        )
-        self.btn_done.setVisible(
-            state.phase in ('surveying', 'calibrating') and placed
-        )
-        self.btn_next.setVisible(state.phase == 'routing')
-        self.btn_reset.setVisible(has_items or state.phase != 'idle')
+        # Mode toggle button highlights
+        self.btn_mode_regular.setStyleSheet(self._btn_style('#1a3a6a' if not ml else '#111133'))
+        self.btn_mode_ml.setStyleSheet(self._btn_style('#4a1a4a' if ml else '#111133'))
+
+        # Regular controls visibility
+        self._regular_controls.setVisible(not ml)
+        if not ml:
+            self.btn_set_pos.setVisible(
+                state.phase not in ('routing',) and (not has_pos or state.phase == 'set_player')
+            )
+            self.btn_start.setVisible(
+                state.phase == 'idle' and has_pos and has_chat_dir
+            )
+            self.btn_done.setVisible(
+                state.phase in ('surveying', 'calibrating') and placed
+            )
+            self.btn_next.setVisible(state.phase == 'routing')
+            self.btn_reset.setVisible(has_items or state.phase != 'idle')
+
+        # Motherlode controls visibility and content
+        self._ml_section.setVisible(ml and has_chat_dir)
+        if ml:
+            if state.ml_round >= 3:
+                self.lbl_ml_status.setText('Trilateration complete — mine the motherlodes!')
+            elif state.ml_phase == 'set_pos':
+                self.lbl_ml_status.setText(
+                    f'Round {state.ml_round + 1}: Click map to set Position {state.ml_round + 1}'
+                )
+            else:
+                self.lbl_ml_status.setText(
+                    f'Round {state.ml_round + 1}: Scan motherlodes, then click "Next Position"'
+                )
+            self.lbl_ml_count.setText(
+                f'{len(state.ml_pending)} distance(s) collected this round'
+            )
+            if state.scale:
+                self.lbl_ml_scale.setText(f'Scale: {state.scale:.2f} px/m')
+            else:
+                self.lbl_ml_scale.setText('Scale: pending (auto-computed after round 3)')
+            fit = self.app._ml_fit_quality() if state.ml_round >= 3 else None
+            if fit is not None and fit > 50:
+                self.lbl_ml_fit.setText(f'⚠ Fit residual {fit:.1f}px — positions may not be proportional')
+            else:
+                self.lbl_ml_fit.setText(f'Fit: {fit:.1f}px avg' if fit is not None else '')
+            self.btn_ml_next.setEnabled(
+                state.ml_phase == 'survey'
+                and len(state.ml_pending) > 0
+                and state.ml_round < 3
+            )
+            in_routing = state.ml_round >= 3 and bool(state.ml_route_order)
+            has_more = in_routing and any(
+                not e.get('collected')
+                for e in state.ml_surveys
+                if e['id'] != state.ml_active_id
+            )
+            self.btn_ml_skip.setVisible(in_routing)
+            self.btn_ml_skip.setEnabled(has_more)
 
         vis = getattr(self.app, '_overlays_visible', True)
         label = 'ON' if vis else 'OFF'
@@ -978,6 +1431,7 @@ class SurveyApp:
         self._chat_file        = None
         self._chat_offset      = 0
         self._collect_last     = {}   # name_low → time.monotonic() of last collection
+        self._ml_collect_last  = 0.0  # time.monotonic() of last motherlode collection
         self._click_through    = False
         self._inv_locked       = False
         self._overlays_visible = True
@@ -1092,6 +1546,21 @@ class SurveyApp:
     # ── map canvas click ──────────────────────────────────────────────────────
     def _on_map_canvas_click(self, cx: float, cy: float):
         state = self.state
+
+        # ── Motherlode mode: map click sets the current round's player position ──
+        if state.ml_mode and state.ml_phase == 'set_pos' and state.ml_round < 3:
+            round_idx = state.ml_round
+            if len(state.ml_positions) <= round_idx:
+                state.ml_positions.append((cx, cy))
+            else:
+                state.ml_positions[round_idx] = (cx, cy)
+            state.ml_phase = 'survey'
+            self._set_log(
+                f'Position {round_idx + 1} set. '
+                f'Scan motherlodes in-game, then click "Next Position".'
+            )
+            self._refresh_all()
+            return
 
         if state.phase == 'set_player':
             state.player_pos = (cx, cy)
@@ -1288,6 +1757,224 @@ class SurveyApp:
         self._refresh_all()
 
     # ── polling ───────────────────────────────────────────────────────────────
+    # ── Motherlode mode ───────────────────────────────────────────────────────
+    def enter_ml_mode(self):
+        self.state.ml_mode = True
+        self._set_log('Motherlode mode: click map to set Position 1.')
+        self._refresh_all()
+
+    def exit_ml_mode(self):
+        self.state.ml_mode = False
+        self._set_log('Returned to Regular Survey mode.')
+        self._refresh_all()
+
+    def ml_next_position(self):
+        state = self.state
+        if not state.ml_mode:
+            return
+        if state.ml_phase != 'survey' or not state.ml_pending:
+            self._set_log('Scan at least one motherlode first.')
+            return
+
+        round_idx = state.ml_round
+        pending   = list(state.ml_pending)
+
+        # Grow ml_surveys to match the number of distances collected this round
+        while len(state.ml_surveys) < len(pending):
+            state.ml_add_entry()
+
+        # Commit each pending distance to its matching motherlode entry
+        for i, dist in enumerate(pending):
+            entry = state.ml_surveys[i]
+            # Pad any skipped prior rounds with 0
+            while len(entry['distances']) < round_idx:
+                entry['distances'].append(0.0)
+            if len(entry['distances']) == round_idx:
+                entry['distances'].append(dist)
+
+        state.ml_pending.clear()
+        state.ml_round += 1
+
+        if state.ml_round >= 3:
+            computed = self._ml_compute_scale()
+            if computed:
+                state.scale = computed
+            self._ml_trilaterate_all()
+            self._ml_optimise_route()
+            fit = self._ml_fit_quality()
+            fit_msg = f'  Fit: {fit:.1f}px avg' if fit is not None else ''
+            if computed:
+                scale_msg = f'  Scale: {computed:.2f} px/m (auto)'
+            elif state.scale:
+                scale_msg = f'  Scale: {state.scale:.2f} px/m (from Regular Survey)'
+            else:
+                scale_msg = '  ⚠ No scale — calibrate via Regular Survey first.'
+            self._set_log(f'Trilateration complete.{scale_msg}{fit_msg}')
+        else:
+            state.ml_phase = 'set_pos'
+            self._set_log(
+                f'Round {round_idx + 1} committed ({len(pending)} distances). '
+                f'Move to Position {state.ml_round + 1} and click the map.'
+            )
+        self._refresh_all()
+
+    def _ml_compute_scale(self):
+        """Solve for scale using the quadratic-in-s² convergence algorithm.
+        Updates state.scale on success. Returns the computed scale or None."""
+        result = ml_solve_scale(self.state.ml_positions, self.state.ml_surveys)
+        return result
+
+    def _ml_trilaterate_all(self):
+        state = self.state
+        if len(state.ml_positions) < 3 or not state.scale:
+            return
+        p1, p2, p3 = state.ml_positions[0], state.ml_positions[1], state.ml_positions[2]
+        for entry in state.ml_surveys:
+            dsts = entry['distances']
+            if len(dsts) < 3 or any(d == 0.0 for d in dsts[:3]):
+                entry['estimated_pos'] = None
+                continue
+            r1 = dsts[0] * state.scale
+            r2 = dsts[1] * state.scale
+            r3 = dsts[2] * state.scale
+            entry['estimated_pos'] = trilaterate(p1, r1, p2, r2, p3, r3)
+
+    def _ml_fit_quality(self):
+        """Return average circle residual in pixels, or None if uncalculable."""
+        state = self.state
+        if not state.scale or len(state.ml_positions) < 3:
+            return None
+        total = 0.0
+        count = 0
+        for entry in state.ml_surveys:
+            ep = entry.get('estimated_pos')
+            if not ep:
+                continue
+            for i, pos in enumerate(state.ml_positions[:3]):
+                if i >= len(entry['distances']):
+                    break
+                d = entry['distances'][i]
+                if d == 0:
+                    continue
+                r_expected = d * state.scale
+                r_actual   = pt_dist(ep, pos)
+                total += abs(r_actual - r_expected)
+                count += 1
+        return total / count if count else None
+
+    def _ml_optimise_route(self):
+        """Nearest-neighbour + 2-opt route through uncollected estimated positions."""
+        state      = self.state
+        candidates = [e for e in state.ml_surveys
+                      if not e['collected'] and e.get('estimated_pos')]
+        if not candidates:
+            return
+        start     = state.ml_positions[-1] if state.ml_positions else (0.0, 0.0)
+        remaining = list(candidates)
+        route     = []
+        current   = start
+        while remaining:
+            nearest = min(remaining, key=lambda e: pt_dist(current, e['estimated_pos']))
+            route.append(nearest['id'])
+            current = nearest['estimated_pos']
+            remaining.remove(nearest)
+        route = self._ml_two_opt(route)
+        state.ml_route_order = route
+        state.ml_route_idx   = 0
+        for idx, eid in enumerate(route):
+            entry = next((e for e in state.ml_surveys if e['id'] == eid), None)
+            if entry:
+                entry['route_order'] = idx
+
+    def _ml_two_opt(self, route: list) -> list:
+        pos   = {e['id']: e['estimated_pos'] for e in self.state.ml_surveys}
+        start = self.state.ml_positions[-1] if self.state.ml_positions else (0.0, 0.0)
+        pts   = [start] + [pos[eid] for eid in route]
+        ids   = [None]  + list(route)
+        n     = len(pts)
+        improved = True
+        while improved:
+            improved = False
+            for i in range(n - 2):
+                for j in range(i + 2, n - 1):
+                    d_old = pt_dist(pts[i], pts[i+1]) + pt_dist(pts[j], pts[j+1])
+                    d_new = pt_dist(pts[i], pts[j])   + pt_dist(pts[i+1], pts[j+1])
+                    if d_new < d_old - 1e-9:
+                        pts[i+1:j+1] = pts[i+1:j+1][::-1]
+                        ids[i+1:j+1] = ids[i+1:j+1][::-1]
+                        improved = True
+        return ids[1:]
+
+    def ml_skip_next(self):
+        """Skip the current target and advance to the next uncollected."""
+        state = self.state
+        remaining = [
+            (idx, eid) for idx, eid in enumerate(state.ml_route_order)
+            if idx > state.ml_route_idx
+            and not next((e for e in state.ml_surveys if e['id'] == eid), {}).get('collected')
+        ]
+        if not remaining:
+            self._set_log('All motherlodes visited!')
+            self._refresh_all()
+            return
+        state.ml_route_idx = remaining[0][0]
+        self._refresh_all()
+        entry = next((e for e in state.ml_surveys
+                      if e['id'] == state.ml_active_id), None)
+        self._set_log(f'Next: Treasure {entry["id"]}' if entry else 'Route complete.')
+
+    def reset_ml(self):
+        state = self.state
+        state.ml_round       = 0
+        state.ml_phase       = 'set_pos'
+        state.ml_positions.clear()
+        state.ml_surveys.clear()
+        state.ml_pending.clear()
+        state._ml_next_id    = 0
+        state.ml_route_order = []
+        state.ml_route_idx   = -1
+        self._set_log('Motherlode reset. Click map to set Position 1.')
+        self._refresh_all()
+
+    def _on_ml_collected(self):
+        """Mark the next uncollected entry in route order as collected.
+        Deduplicates: multiple slab lines from the same mine event are
+        suppressed within a 5-second window after the first is processed."""
+        now = time.monotonic()
+        if now - self._ml_collect_last < 5.0:
+            return
+        self._ml_collect_last = now
+        state = self.state
+
+        # Prefer the current route target; fall back to first uncollected
+        active = state.ml_active_id
+        target = next((e for e in state.ml_surveys if e['id'] == active), None) \
+                 if active else None
+        if target is None:
+            target = next((e for e in state.ml_surveys if not e['collected']), None)
+        if target is None:
+            return
+
+        target['collected'] = True
+        if target.get('estimated_pos'):
+            self.state.player_pos = tuple(target['estimated_pos'])
+        self._set_log(f'Motherlode Treasure {target["id"]} collected.')
+
+        # Advance route index to next uncollected entry
+        remaining = [
+            (idx, eid) for idx, eid in enumerate(state.ml_route_order)
+            if idx > state.ml_route_idx
+            and not next((e for e in state.ml_surveys if e['id'] == eid), {}).get('collected')
+        ]
+        if remaining:
+            state.ml_route_idx = remaining[0][0]
+            nxt = next((e for e in state.ml_surveys
+                        if e['id'] == state.ml_active_id), None)
+            if nxt:
+                self._set_log(
+                    f'Treasure {target["id"]} collected.  Next: Treasure {nxt["id"]}')
+        self._refresh_all()
+
     def _poll(self):
         self._poll_chat_log()
 
@@ -1323,12 +2010,27 @@ class SurveyApp:
                     new_text = f.read()
                 self._chat_offset = size
                 for line in new_text.splitlines():
-                    result = parse_chat_survey_line(line)
-                    if result:
-                        self._on_survey_item(*result)
-                    name = parse_collect_line(line)
-                    if name:
-                        self._on_item_collected(name)
+                    if self.state.ml_mode:
+                        dist = parse_ml_dist_line(line)
+                        if dist is not None and self.state.ml_phase == 'survey' and self.state.ml_round < 3:
+                            self.state.ml_pending.append(dist)
+                            n = len(self.state.ml_pending)
+                            self._set_log(
+                                f'Round {self.state.ml_round + 1}: {n} distance(s) collected '
+                                f'(latest: {dist:.0f}m). Click "Next Position" when done scanning.'
+                            )
+                            self.control.refresh()
+                            self.map_overlay.refresh()
+                            self.inv_overlay.refresh()
+                        if parse_ml_collect_line(line):
+                            self._on_ml_collected()
+                    else:
+                        result = parse_chat_survey_line(line)
+                        if result:
+                            self._on_survey_item(*result)
+                        name = parse_collect_line(line)
+                        if name:
+                            self._on_item_collected(name)
         except Exception:
             pass
 
@@ -1468,6 +2170,27 @@ class SurveyApp:
                     for i in st.items
                 ],
             }
+            ml = self.state
+            data['motherlode_state'] = {
+                'ml_mode':        ml.ml_mode,
+                'ml_round':       ml.ml_round,
+                'ml_phase':       ml.ml_phase,
+                'ml_positions':   [list(p) for p in ml.ml_positions],
+                'ml_pending':     list(ml.ml_pending),
+                'ml_next_id':     ml._ml_next_id,
+                'ml_route_order': list(ml.ml_route_order),
+                'ml_route_idx':   ml.ml_route_idx,
+                'ml_surveys': [
+                    {
+                        'id':            e['id'],
+                        'distances':     list(e['distances']),
+                        'estimated_pos': list(e['estimated_pos']) if e['estimated_pos'] else None,
+                        'collected':     e['collected'],
+                        'route_order':   e.get('route_order', -1),
+                    }
+                    for e in ml.ml_surveys
+                ],
+            }
             SETTINGS_PATH.write_text(json.dumps(data, indent=2))
         except Exception:
             pass
@@ -1546,10 +2269,11 @@ class SurveyApp:
                     self.inv_overlay.hide()
 
             ss = data.get('survey_state')
+            if ss and ss.get('scale') is not None:
+                self.state.scale = ss['scale']
             if ss and (ss.get('items') or ss.get('phase', 'idle') != 'idle'):
                 st = self.state
                 st._next_id    = ss.get('next_id', 0)
-                st.scale       = ss.get('scale')
                 st.player_pos  = tuple(ss['player_pos']) if ss.get('player_pos') else None
                 st.route_order = ss.get('route_order', [])
                 st.route_idx   = ss.get('route_idx', -1)
@@ -1574,6 +2298,32 @@ class SurveyApp:
                 # Refresh overlays directly (not via _refresh_all) to avoid a redundant save
                 self.map_overlay.refresh()
                 self.inv_overlay.refresh()
+
+            mls = data.get('motherlode_state')
+            if mls:
+                st = self.state
+                st.ml_mode      = bool(mls.get('ml_mode', False))
+                st.ml_round     = int(mls.get('ml_round', 0))
+                st.ml_phase     = mls.get('ml_phase', 'set_pos')
+                st.ml_positions = [tuple(p) for p in mls.get('ml_positions', [])]
+                st.ml_pending   = list(mls.get('ml_pending', []))
+                st._ml_next_id  = int(mls.get('ml_next_id', 0))
+                st.ml_route_order = list(mls.get('ml_route_order', []))
+                st.ml_route_idx   = int(mls.get('ml_route_idx', -1))
+                st.ml_surveys   = []
+                for d in mls.get('ml_surveys', []):
+                    st.ml_surveys.append({
+                        'id':            d['id'],
+                        'distances':     list(d.get('distances', [])),
+                        'estimated_pos': tuple(d['estimated_pos']) if d.get('estimated_pos') else None,
+                        'collected':     bool(d.get('collected', False)),
+                        'route_order':   int(d.get('route_order', -1)),
+                    })
+                # Rebuild route if estimated positions exist but route_order was lost
+                if (st.ml_round >= 3
+                        and not st.ml_route_order
+                        and any(e.get('estimated_pos') for e in st.ml_surveys)):
+                    self._ml_optimise_route()
 
         except Exception:
             pass
