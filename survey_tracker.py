@@ -13,6 +13,7 @@ Key features:
   • Click during survey → recalibrates using most recent dot
   • Nearest-neighbour route optimisation with guided step-through
   • Watches ChatLogs for "X collected!" → removes from inventory
+  • "Flip Dirs" toggle inverts N/S and E/W for areas with reversed coordinates
   • All positions/settings saved to JSON in the same folder as this script
 """
 
@@ -311,11 +312,12 @@ class SurveyState:
         for idx, item in enumerate(i for i in self.items if not i['collected']):
             item['grid_index'] = idx
 
-    def player_to_pixel(self, offset, canvas_w, canvas_h):
+    def player_to_pixel(self, offset, canvas_w, canvas_h, invert_dirs=False):
         if not self.player_pos or not self.scale:
             return None
-        px = self.player_pos[0] + offset['east']  *  self.scale
-        py = self.player_pos[1] - offset['north'] *  self.scale  # north = up = –y
+        sign = -1 if invert_dirs else 1
+        px = self.player_pos[0] + sign * offset['east']  *  self.scale
+        py = self.player_pos[1] - sign * offset['north'] *  self.scale  # north = up = –y
         return (max(6.0, min(canvas_w - 6.0, px)),
                 max(6.0, min(canvas_h - 6.0, py)))
 
@@ -1305,6 +1307,9 @@ class ControlPanel(QWidget):
         self.btn_inv_lock = self._small_btn('Inv: Unlocked',
                                             self.app.toggle_inv_lock, '#1a3a1a')
         row4.addWidget(self.btn_inv_lock)
+        row4.addSpacing(4)
+        self.btn_invert_dirs = self._small_btn('Flip Dirs: OFF', self.app.toggle_invert_dirs, '#3a1a3a')
+        row4.addWidget(self.btn_invert_dirs)
         row4.addStretch()
         sec.addLayout(row4)
 
@@ -1439,6 +1444,15 @@ class ControlPanel(QWidget):
             f'QPushButton:hover {{ border-color: #8ab; }}'
         )
 
+        inv = getattr(self.app, '_invert_dirs', False)
+        self.btn_invert_dirs.setText(f'Flip Dirs: {"ON" if inv else "OFF"}')
+        self.btn_invert_dirs.setStyleSheet(
+            f'QPushButton {{ background:{"#5a1a5a" if inv else "#3a1a3a"}; color:#cde; '
+            f'border:1px solid #446; padding:2px 6px; border-radius:3px; '
+            f'font-size:10px; font-weight:600; }}'
+            f'QPushButton:hover {{ border-color: #8ab; }}'
+        )
+
         vis = getattr(self.app, '_overlays_visible', True)
         label = 'ON' if vis else 'OFF'
         color = '#1a3a1a' if vis else '#5a1a1a'
@@ -1472,6 +1486,7 @@ class SurveyApp:
         self._inv_locked       = False
         self._overlays_visible  = True
         self._route_lines_visible = True
+        self._invert_dirs      = False
 
         # Polling timer (0.5 s)
         self._timer = QTimer()
@@ -1690,7 +1705,7 @@ class SurveyApp:
                     and existing['pixel_estimates']:
                 cw = self.map_overlay.width()
                 ch = self.map_overlay.canvas_h
-                new_px = state.player_to_pixel(offset, cw, ch)
+                new_px = state.player_to_pixel(offset, cw, ch, self._invert_dirs)
                 if new_px:
                     existing['pixel_estimates'].append(new_px)
                     n = len(existing['pixel_estimates'])
@@ -1717,7 +1732,7 @@ class SurveyApp:
             # Auto-place and record the estimate
             cw = self.map_overlay.width()
             ch = self.map_overlay.canvas_h
-            px = state.player_to_pixel(offset, cw, ch)
+            px = state.player_to_pixel(offset, cw, ch, self._invert_dirs)
             item['pixel_pos'] = px
             if px:
                 item['pixel_estimates'].append(px)
@@ -2161,6 +2176,24 @@ class SurveyApp:
         self.control.refresh()
         self.save_settings()
 
+    def toggle_invert_dirs(self):
+        self._invert_dirs = not self._invert_dirs
+        self._recompute_dot_positions()
+        self.save_settings()
+
+    def _recompute_dot_positions(self):
+        """Re-run player_to_pixel for all auto-placed items using current inversion flag."""
+        cw = self.map_overlay.width()
+        ch = self.map_overlay.canvas_h
+        for item in self.state.items:
+            if item['pixel_estimates']:  # only auto-placed dots
+                px = self.state.player_to_pixel(
+                    item['offset'], cw, ch, self._invert_dirs
+                )
+                if px:
+                    item['pixel_pos'] = px
+        self._refresh_all()
+
     def save_settings(self):
         try:
             SETTINGS_PATH.parent.mkdir(parents=True, exist_ok=True)
@@ -2182,6 +2215,7 @@ class SurveyApp:
                 'map_click_through': self._click_through,
                 'overlays_visible':     self._overlays_visible,
                 'route_lines_visible':  self._route_lines_visible,
+                'invert_dirs':          self._invert_dirs,
                 'grid': {
                     'cols':      GRID_COLS,
                     'slot_size': SLOT_SIZE,
@@ -2303,6 +2337,9 @@ class SurveyApp:
 
             if 'route_lines_visible' in data:
                 self._route_lines_visible = bool(data['route_lines_visible'])
+
+            if 'invert_dirs' in data:
+                self._invert_dirs = bool(data['invert_dirs'])
 
             if 'overlays_visible' in data:
                 self._overlays_visible = bool(data['overlays_visible'])
