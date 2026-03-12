@@ -2,6 +2,9 @@
 
 A transparent overlay tool for **Project Gorgon** that helps players track and collect survey map items in real time.
 
+## How to Start
+You can download the survey tool [Here](https://github.com/kaeus/GorgonSurveyTracker/releases) by downloading the latest `GorgonSurveyTracker.exe`. Instructions to run from source are down below if you prefer that!
+
 ## Overview
 
 - Monitors the game's ChatLogs folder for `[Status]` distance messages and automatically places survey item dots on the map
@@ -18,7 +21,7 @@ A transparent overlay tool for **Project Gorgon** that helps players track and c
 
 ![Overlays](https://raw.githubusercontent.com/kaeus/GorgonSurveyTracker/refs/heads/main/ReadmeScreens/Overlay.png "Example Overlays")
 
-![Summary Window](https://raw.githubusercontent.com/kaeus/GorgonSurveyTracker/refs/heads/main/ReadmeScreens/SummaryWindow.png "Summary")
+![Summary Window](https://raw.githubusercontent.com/kaeus/GorgonSurveyTracker/refs/heads/main/ReadmeScreens/SessionSummary.png "Summary")
 
 ## In game setup
 
