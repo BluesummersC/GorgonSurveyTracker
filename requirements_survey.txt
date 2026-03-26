@@ -1,4 +1,5 @@
 PyQt5>=5.15
+pynput>=1.7          # cross-platform hotkey + mouse simulation (Windows also works without it)
 
 # Optional platform-specific dependencies:
 # macOS click-through support:

@@ -24,7 +24,26 @@ import json
 import math
 import time
 import ctypes
+import threading
 import datetime
+
+# ── pynput — optional cross-platform input library ────────────────────────────
+try:
+    import pynput.keyboard as _pynput_kb
+    import pynput.mouse    as _pynput_mouse
+    _PYNPUT_AVAILABLE = True
+except ImportError:
+    _pynput_kb        = None
+    _pynput_mouse     = None
+    _PYNPUT_AVAILABLE = False
+
+# Global hotkeys do not work under Wayland; detect it early.
+_WAYLAND = (
+    sys.platform.startswith('linux')
+    and os.environ.get('XDG_SESSION_TYPE', '').lower() == 'wayland'
+)
+# Feature gate: True when a cross-platform listener can be started.
+_HOTKEY_SUPPORTED = _PYNPUT_AVAILABLE and not _WAYLAND
 from collections import Counter
 from pathlib import Path
 
@@ -34,7 +53,7 @@ from PyQt5.QtWidgets import (
     QFileDialog, QMessageBox, QSizeGrip,
     QDialog, QTableWidget, QTableWidgetItem, QHeaderView, QProgressBar,
 )
-from PyQt5.QtCore  import Qt, QTimer, QPoint, QSize, pyqtSignal
+from PyQt5.QtCore  import Qt, QTimer, QPoint, QSize, pyqtSignal, QObject
 from PyQt5.QtGui   import (
     QPainter, QColor, QPen, QBrush, QFont, QCursor,
 )
@@ -47,6 +66,80 @@ GRID_ROWS   = 8
 SLOT_SIZE   = 50          # px
 SLOT_GAP    = 2           # px
 HEADER_H    = 28          # px — header height for both overlays
+
+# Qt.Key_* → human-readable label (platform-neutral; used by HotkeyCaptureDialog)
+# Populated after Qt is imported so Qt.Key_* constants are available.
+def _build_qt_key_label_map():
+    return {
+        Qt.Key_Backspace: 'Backspace', Qt.Key_Tab:     'Tab',
+        Qt.Key_Return:    'Enter',     Qt.Key_Escape:  'Esc',
+        Qt.Key_Space:     'Space',
+        Qt.Key_PageUp:    'PgUp',      Qt.Key_PageDown: 'PgDn',
+        Qt.Key_End:       'End',       Qt.Key_Home:    'Home',
+        Qt.Key_Left:      'Left',      Qt.Key_Up:      'Up',
+        Qt.Key_Right:     'Right',     Qt.Key_Down:    'Down',
+        Qt.Key_Insert:    'Insert',    Qt.Key_Delete:  'Delete',
+        Qt.Key_F1:  'F1',  Qt.Key_F2:  'F2',  Qt.Key_F3:  'F3',  Qt.Key_F4:  'F4',
+        Qt.Key_F5:  'F5',  Qt.Key_F6:  'F6',  Qt.Key_F7:  'F7',  Qt.Key_F8:  'F8',
+        Qt.Key_F9:  'F9',  Qt.Key_F10: 'F10', Qt.Key_F11: 'F11', Qt.Key_F12: 'F12',
+        Qt.Key_Asterisk: 'Num*', Qt.Key_Plus: 'Num+',
+        Qt.Key_Minus:    'Num-', Qt.Key_Period: 'Num.', Qt.Key_Slash: 'Num/',
+    }
+
+_QT_KEY_LABEL_MAP  = None   # initialised lazily on first use (Qt must be imported first)
+
+# Qt modifier-only keys — ignore during hotkey capture
+_QT_MODIFIER_KEYS = None    # initialised lazily
+
+def _get_qt_key_label_map():
+    global _QT_KEY_LABEL_MAP
+    if _QT_KEY_LABEL_MAP is None:
+        _QT_KEY_LABEL_MAP = _build_qt_key_label_map()
+    return _QT_KEY_LABEL_MAP
+
+def _get_qt_modifier_keys():
+    global _QT_MODIFIER_KEYS
+    if _QT_MODIFIER_KEYS is None:
+        _QT_MODIFIER_KEYS = {
+            Qt.Key_Shift, Qt.Key_Control, Qt.Key_Alt, Qt.Key_Meta,
+            Qt.Key_CapsLock, Qt.Key_NumLock, Qt.Key_ScrollLock,
+        }
+    return _QT_MODIFIER_KEYS
+
+# Windows VK → (qt_key_int, qt_mods_int) — used only for migrating old settings
+def _build_vk_to_qt():
+    kp = int(Qt.KeypadModifier)
+    return {
+        0x60: (int(Qt.Key_0), kp), 0x61: (int(Qt.Key_1), kp),
+        0x62: (int(Qt.Key_2), kp), 0x63: (int(Qt.Key_3), kp),
+        0x64: (int(Qt.Key_4), kp), 0x65: (int(Qt.Key_5), kp),
+        0x66: (int(Qt.Key_6), kp), 0x67: (int(Qt.Key_7), kp),
+        0x68: (int(Qt.Key_8), kp), 0x69: (int(Qt.Key_9), kp),
+        0x70: (int(Qt.Key_F1),  0), 0x71: (int(Qt.Key_F2),  0),
+        0x72: (int(Qt.Key_F3),  0), 0x73: (int(Qt.Key_F4),  0),
+        0x74: (int(Qt.Key_F5),  0), 0x75: (int(Qt.Key_F6),  0),
+        0x76: (int(Qt.Key_F7),  0), 0x77: (int(Qt.Key_F8),  0),
+        0x78: (int(Qt.Key_F9),  0), 0x79: (int(Qt.Key_F10), 0),
+        0x7A: (int(Qt.Key_F11), 0), 0x7B: (int(Qt.Key_F12), 0),
+        0x2D: (int(Qt.Key_Insert),   0), 0x2E: (int(Qt.Key_Delete),   0),
+        0x24: (int(Qt.Key_Home),     0), 0x23: (int(Qt.Key_End),      0),
+        0x21: (int(Qt.Key_PageUp),   0), 0x22: (int(Qt.Key_PageDown), 0),
+        0x25: (int(Qt.Key_Left),     0), 0x26: (int(Qt.Key_Up),       0),
+        0x27: (int(Qt.Key_Right),    0), 0x28: (int(Qt.Key_Down),     0),
+    }
+
+def _migrate_vk_config(hk: dict) -> dict:
+    """Convert an old {'vk': <win_vk>, ...} hotkey config to the new Qt-key format."""
+    vk    = hk.get('vk', 0x60)
+    label = hk.get('label', 'Num0')
+    mods  = hk.get('modifiers', [])
+    qt_key, qt_mods = _build_vk_to_qt().get(vk, (int(Qt.Key_0), int(Qt.KeypadModifier)))
+    mod_flags = 0
+    if 'ctrl'  in mods: mod_flags |= int(Qt.ControlModifier)
+    if 'shift' in mods: mod_flags |= int(Qt.ShiftModifier)
+    if 'alt'   in mods: mod_flags |= int(Qt.AltModifier)
+    qt_mods |= mod_flags
+    return {'qt_key': qt_key, 'qt_mods': qt_mods, 'modifiers': mods, 'label': label}
 
 SETTINGS_PATH = (
     Path(sys.executable).parent if getattr(sys, 'frozen', False) else Path(__file__).parent
@@ -543,7 +636,7 @@ class MapOverlay(DragMixin, QWidget):
         self._drag_init()
         self._bg_alpha      = 0.18
         self._click_through = False
-        self._show_labels   = True
+        self._show_labels   = 1   # 0=Off 1=Name 2=Slot# 3=Both
 
         self.setWindowFlags(Qt.FramelessWindowHint | Qt.WindowStaysOnTopHint | Qt.Tool)
         if sys.platform == 'darwin':   # Qt.Tool → NSPanel which auto-hides on deactivation
@@ -676,12 +769,16 @@ class MapOverlay(DragMixin, QWidget):
         if not self._show_labels:
             return
 
-        # label
-        label_parts = [clean_name(item['name'])]
-        if item['route_order'] >= 0 and self.state.phase == 'routing':
-            label_parts.insert(0, f"{item['route_order'] + 1}.")
-
-        label = ' '.join(label_parts)
+        # label — 1=Name, 2=Slot#, 3=Both
+        if self._show_labels == 2:
+            label = str(item['grid_index'] + 1)
+        elif self._show_labels == 3:
+            label = f"{item['grid_index'] + 1}. {clean_name(item['name'])}"
+        else:
+            label_parts = [clean_name(item['name'])]
+            if item['route_order'] >= 0 and self.state.phase == 'routing':
+                label_parts.insert(0, f"{item['route_order'] + 1}.")
+            label = ' '.join(label_parts)
         p.setPen(QColor(220, 220, 220, 190))
         p.setFont(QFont('Segoe UI', 8))
         fm = p.fontMetrics()
@@ -776,7 +873,7 @@ class MapOverlay(DragMixin, QWidget):
             p.drawEllipse(int(ex_) - dot_r, int(ey_s) - dot_r,
                           dot_r * 2, dot_r * 2)
 
-            if self._show_labels and not entry['collected']:
+            if self._show_labels > 0 and not entry['collected']:
                 order_str = (f'{entry["route_order"] + 1}. ' if entry.get('route_order', -1) >= 0 else '')
                 label = f'{order_str}Treasure {entry["id"]}'
                 p.setPen(QColor(220, 220, 180, 200))
@@ -1268,6 +1365,66 @@ class SummaryWindow(QDialog):
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# Hotkey capture dialog
+# ─────────────────────────────────────────────────────────────────────────────
+class HotkeyCaptureDialog(QDialog):
+    """Modal dialog that captures a single keypress (+ modifiers) as a hotkey."""
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.result_qt_key  = None   # int — Qt.Key_* value
+        self.result_qt_mods = 0      # int — Qt.KeyboardModifiers flags
+        self.result_mods    = []     # list[str] — ['ctrl','shift','alt']
+        self.result_label   = ''
+        self.setWindowTitle('Set Hotkey')
+        self.setWindowFlags(Qt.Dialog | Qt.WindowStaysOnTopHint)
+        lbl = QLabel(
+            'Press the desired key combination (Esc = cancel)\n\n'
+            'During Surveying: clicks the next empty inventory slot\n'
+            'During Routing: double-clicks the active slot to collect it'
+        )
+        lbl.setAlignment(Qt.AlignCenter)
+        lbl.setStyleSheet('color:#cde; font-size:11px; padding:12px;')
+        layout = QVBoxLayout(self)
+        layout.addWidget(lbl)
+        self.setStyleSheet('background:#1a1a2e;')
+        self.resize(340, 120)
+
+    def keyPressEvent(self, event):
+        qt_key = event.key()
+        if qt_key == Qt.Key_Escape:
+            self.reject()
+            return
+        if qt_key in _get_qt_modifier_keys():
+            return   # ignore bare modifier presses
+        mods = []
+        if event.modifiers() & Qt.ControlModifier:
+            mods.append('ctrl')
+        if event.modifiers() & Qt.ShiftModifier:
+            mods.append('shift')
+        if event.modifiers() & Qt.AltModifier:
+            mods.append('alt')
+        is_numpad = bool(event.modifiers() & Qt.KeypadModifier)
+        # Build label
+        key_name = _get_qt_key_label_map().get(qt_key)
+        if key_name is None:
+            if Qt.Key_0 <= qt_key <= Qt.Key_9:
+                key_name = f'Num{chr(qt_key)}' if is_numpad else chr(qt_key)
+            elif Qt.Key_A <= qt_key <= Qt.Key_Z:
+                key_name = chr(qt_key)
+            else:
+                key_name = f'Key{qt_key:#06x}'
+        elif is_numpad and Qt.Key_0 <= qt_key <= Qt.Key_9:
+            key_name = f'Num{chr(qt_key)}'
+        mod_labels = [m.capitalize() for m in mods]
+        self.result_qt_key  = qt_key
+        self.result_qt_mods = int(event.modifiers())
+        self.result_mods    = mods
+        self.result_label   = '+'.join(mod_labels + [key_name])
+        self.accept()
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # Control Panel
 # ─────────────────────────────────────────────────────────────────────────────
 class ControlPanel(QWidget):
@@ -1326,7 +1483,7 @@ class ControlPanel(QWidget):
         title.setStyleSheet('font-size:14px; font-weight:700; color:#9bc;')
         row_title.addWidget(title)
         row_title.addStretch()
-        self.btn_labels      = self._small_btn('Labels: ON', self.app.toggle_map_labels, '#1a2a3a')
+        self.btn_labels      = self._small_btn('Labels: Name', self.app.toggle_map_labels, '#1a2a3a')
         row_title.addWidget(self.btn_labels)
         self.btn_route_lines = self._small_btn('Route: ON', self.app.toggle_route_lines, '#1a2a3a')
         row_title.addWidget(self.btn_route_lines)
@@ -1342,9 +1499,11 @@ class ControlPanel(QWidget):
         row_mode = QHBoxLayout()
         self.btn_mode_regular = self._btn('Regular Survey',    self.app.exit_ml_mode,  '#1a3a6a')
         self.btn_mode_ml      = self._btn('Motherlode Survey', self.app.enter_ml_mode, '#4a1a4a')
+        self.btn_hotkey       = self._small_btn('Hotkey: Num0', self.app.set_hotkey_binding, '#1a3a2a')
         row_mode.addWidget(self.btn_mode_regular)
         row_mode.addWidget(self.btn_mode_ml)
         row_mode.addStretch()
+        row_mode.addWidget(self.btn_hotkey)
         main.addLayout(row_mode)
 
         # ── Files row ──────────────────────────────────────────────────────
@@ -1403,8 +1562,7 @@ class ControlPanel(QWidget):
         self.btn_next    = self._btn('→ Skip to Next',      self.app.advance_route,    '#1a3a5a')
         self.btn_reset   = self._btn('🗑 Reset',            self.app.reset_survey,     '#5a1a1a')
         self.btn_summary = self._btn('📊 View Summary',     self.app.show_summary,     '#1a3a4a')
-        for b in (self.btn_set_pos, self.btn_start, self.btn_done, self.btn_next,
-                  self.btn_reset, self.btn_summary):
+        for b in (self.btn_set_pos, self.btn_start, self.btn_done, self.btn_next, self.btn_reset, self.btn_summary):
             rc_layout.addWidget(b)
         rc_layout.addStretch()
         sec.addWidget(self._regular_controls)
@@ -1595,9 +1753,10 @@ class ControlPanel(QWidget):
             self.btn_ml_skip.setVisible(in_routing)
             self.btn_ml_skip.setEnabled(has_more)
 
-        lbl_on = getattr(self.app.map_overlay, '_show_labels', True)
-        lbl_color = '#1a2a3a' if lbl_on else '#5a1a1a'
-        self.btn_labels.setText(f'Labels: {"ON" if lbl_on else "OFF"}')
+        _lbl_names = {0: 'Off', 1: 'Name', 2: 'Slot#', 3: 'Both'}
+        lbl_state = getattr(self.app.map_overlay, '_show_labels', 1)
+        lbl_color = '#5a1a1a' if lbl_state == 0 else '#1a2a3a'
+        self.btn_labels.setText(f'Labels: {_lbl_names.get(lbl_state, "Name")}')
         self.btn_labels.setStyleSheet(
             f'QPushButton {{ background:{lbl_color}; color:#cde; border:1px solid #446; '
             f'padding:2px 6px; border-radius:3px; font-size:10px; font-weight:600; }}'
@@ -1635,6 +1794,14 @@ class ControlPanel(QWidget):
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# Hotkey signal bridge (pynput thread → Qt main thread)
+# ─────────────────────────────────────────────────────────────────────────────
+class _HotkeySignalBridge(QObject):
+    """Emits a Qt signal from the pynput listener thread so the main thread stays safe."""
+    triggered = pyqtSignal()
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # Main Application
 # ─────────────────────────────────────────────────────────────────────────────
 class SurveyApp:
@@ -1654,10 +1821,9 @@ class SurveyApp:
         self._ml_collect_last  = 0.0  # time.monotonic() of last motherlode collection
         self._click_through    = False
         self._inv_locked       = False
-        self._overlays_visible  = True
+        self._overlays_visible    = True
         self._route_lines_visible = True
         self._invert_dirs      = False
-
         # ── Session summary tracking ──────────────────────────────────────────
         self._survey_start_time     = None   # datetime when Optimize Route clicked
         self._survey_end_time       = None   # datetime when last item collected
@@ -1676,6 +1842,29 @@ class SurveyApp:
         self._blink_timer = QTimer()
         self._blink_timer.timeout.connect(lambda: self.map_overlay.refresh())
         self._blink_timer.start(600)
+
+        # Configurable survey-slot hotkey (default: Numpad 0)
+        # Config stores Qt.Key_* int + Qt.KeyboardModifiers int (platform-neutral).
+        self._hotkey_config = {
+            'qt_key':    int(Qt.Key_0),
+            'qt_mods':   int(Qt.KeypadModifier),
+            'modifiers': [],
+            'label':     'Num0',
+        }
+        self._hotkey_down      = False
+        self._capturing_hotkey = False
+        self._held_modifiers   = set()   # modifier keys currently held (written by pynput thread)
+        self._kb_listener      = None
+
+        if _HOTKEY_SUPPORTED:
+            self._hk_bridge = _HotkeySignalBridge()
+            self._hk_bridge.triggered.connect(self._trigger_survey_slot)
+            self._start_kb_listener()
+        elif sys.platform == 'win32':
+            # Legacy fallback when pynput is not installed
+            self._hotkey_timer = QTimer()
+            self._hotkey_timer.timeout.connect(self._poll_hotkeys)
+            self._hotkey_timer.start(50)
 
         self._load_settings()
         self.control.refresh()  # update section visibility after settings are loaded
@@ -2313,6 +2502,236 @@ class SurveyApp:
         self.map_overlay._flash_item_id = None
         self.map_overlay.refresh()
 
+    # ── Survey-slot hotkey ────────────────────────────────────────────────────
+    def _start_kb_listener(self):
+        """Start (or restart) the pynput keyboard listener in a daemon thread."""
+        if not _HOTKEY_SUPPORTED:
+            return
+        self._stop_kb_listener()
+
+        def on_press(key):
+            # Track held modifiers
+            if key in (_pynput_kb.Key.ctrl, _pynput_kb.Key.ctrl_l, _pynput_kb.Key.ctrl_r):
+                self._held_modifiers.add('ctrl')
+            elif key in (_pynput_kb.Key.shift, _pynput_kb.Key.shift_l, _pynput_kb.Key.shift_r):
+                self._held_modifiers.add('shift')
+            elif key in (_pynput_kb.Key.alt, _pynput_kb.Key.alt_l, _pynput_kb.Key.alt_r):
+                self._held_modifiers.add('alt')
+            if self._capturing_hotkey or self._hotkey_down:
+                return
+            if self._pynput_key_matches(key):
+                self._hotkey_down = True
+                self._hk_bridge.triggered.emit()
+
+        def on_release(key):
+            if key in (_pynput_kb.Key.ctrl, _pynput_kb.Key.ctrl_l, _pynput_kb.Key.ctrl_r):
+                self._held_modifiers.discard('ctrl')
+            elif key in (_pynput_kb.Key.shift, _pynput_kb.Key.shift_l, _pynput_kb.Key.shift_r):
+                self._held_modifiers.discard('shift')
+            elif key in (_pynput_kb.Key.alt, _pynput_kb.Key.alt_l, _pynput_kb.Key.alt_r):
+                self._held_modifiers.discard('alt')
+            if self._pynput_key_matches(key):
+                self._hotkey_down = False
+
+        try:
+            listener = _pynput_kb.Listener(on_press=on_press, on_release=on_release)
+            listener.daemon = True
+            listener.start()
+            self._kb_listener = listener
+        except Exception:
+            self._kb_listener = None
+            self._set_log(
+                '⚠ Hotkey listener failed to start. '
+                'On macOS grant Accessibility permission; on Linux check X11/Wayland.'
+            )
+
+    def _stop_kb_listener(self):
+        if self._kb_listener is not None:
+            try:
+                self._kb_listener.stop()
+            except Exception:
+                pass
+            self._kb_listener = None
+
+    # Windows VK codes for numpad digits (used in _pynput_key_matches)
+    _WIN32_NUMPAD_VK = {
+        int(Qt.Key_0): 0x60, int(Qt.Key_1): 0x61, int(Qt.Key_2): 0x62,
+        int(Qt.Key_3): 0x63, int(Qt.Key_4): 0x64, int(Qt.Key_5): 0x65,
+        int(Qt.Key_6): 0x66, int(Qt.Key_7): 0x67, int(Qt.Key_8): 0x68,
+        int(Qt.Key_9): 0x69,
+    }
+
+    # macOS CGKeyCodes for numpad digits
+    _DARWIN_NUMPAD_VK = {
+        int(Qt.Key_0): 82, int(Qt.Key_1): 83, int(Qt.Key_2): 84,
+        int(Qt.Key_3): 85, int(Qt.Key_4): 86, int(Qt.Key_5): 87,
+        int(Qt.Key_6): 88, int(Qt.Key_7): 89, int(Qt.Key_8): 91,
+        int(Qt.Key_9): 92,
+    }
+
+    # Qt special key → pynput Key enum (built lazily when pynput is available)
+    _QT_TO_PYNPUT_SPECIAL = None
+
+    def _get_qt_to_pynput_special(self):
+        if self._QT_TO_PYNPUT_SPECIAL is None and _PYNPUT_AVAILABLE:
+            K = _pynput_kb.Key
+            SurveyApp._QT_TO_PYNPUT_SPECIAL = {
+                int(Qt.Key_F1):  K.f1,  int(Qt.Key_F2):  K.f2,
+                int(Qt.Key_F3):  K.f3,  int(Qt.Key_F4):  K.f4,
+                int(Qt.Key_F5):  K.f5,  int(Qt.Key_F6):  K.f6,
+                int(Qt.Key_F7):  K.f7,  int(Qt.Key_F8):  K.f8,
+                int(Qt.Key_F9):  K.f9,  int(Qt.Key_F10): K.f10,
+                int(Qt.Key_F11): K.f11, int(Qt.Key_F12): K.f12,
+                int(Qt.Key_Insert):   K.insert,   int(Qt.Key_Delete): K.delete,
+                int(Qt.Key_Home):     K.home,     int(Qt.Key_End):    K.end,
+                int(Qt.Key_PageUp):   K.page_up,  int(Qt.Key_PageDown): K.page_down,
+                int(Qt.Key_Left):     K.left,     int(Qt.Key_Right):  K.right,
+                int(Qt.Key_Up):       K.up,       int(Qt.Key_Down):   K.down,
+                int(Qt.Key_Backspace): K.backspace, int(Qt.Key_Tab):  K.tab,
+                int(Qt.Key_Return):   K.enter,    int(Qt.Key_Space):  K.space,
+                int(Qt.Key_Escape):   K.esc,
+            }
+        return SurveyApp._QT_TO_PYNPUT_SPECIAL or {}
+
+    def _pynput_key_matches(self, key) -> bool:
+        """Return True if the pynput key event matches the configured hotkey."""
+        hk      = self._hotkey_config
+        qt_key  = hk.get('qt_key',  int(Qt.Key_0))
+        qt_mods = hk.get('qt_mods', int(Qt.KeypadModifier))
+        mods    = hk.get('modifiers', [])
+        is_numpad = bool(qt_mods & int(Qt.KeypadModifier))
+
+        # Modifier check
+        for m in mods:
+            if m not in self._held_modifiers:
+                return False
+
+        # Special keys (F1-F12, arrows, etc.)
+        special = self._get_qt_to_pynput_special()
+        if qt_key in special:
+            return key == special[qt_key]
+
+        # Numpad digits — platform-specific VK comparison
+        if is_numpad and int(Qt.Key_0) <= qt_key <= int(Qt.Key_9):
+            if sys.platform == 'win32':
+                expected_vk = self._WIN32_NUMPAD_VK.get(qt_key)
+                return expected_vk is not None and getattr(key, 'vk', None) == expected_vk
+            elif sys.platform == 'darwin':
+                expected_vk = self._DARWIN_NUMPAD_VK.get(qt_key)
+                return expected_vk is not None and getattr(key, 'vk', None) == expected_vk
+            # Linux: numpad digits (NumLock on) arrive as char '0'-'9'
+            return getattr(key, 'char', None) == chr(qt_key)
+
+        # Regular letters / digits — compare char
+        if int(Qt.Key_A) <= qt_key <= int(Qt.Key_Z):
+            return getattr(key, 'char', None) == chr(qt_key).lower()
+        if int(Qt.Key_0) <= qt_key <= int(Qt.Key_9):
+            return getattr(key, 'char', None) == chr(qt_key)
+
+        return False
+
+    # Legacy Windows-only polling (used when pynput is not installed)
+    def _poll_hotkeys(self):
+        if self._capturing_hotkey:
+            return
+        user32  = ctypes.windll.user32
+        hk      = self._hotkey_config
+        # Support both old vk-based configs and new qt_key configs on Windows
+        if 'vk' in hk:
+            vk = hk['vk']
+        else:
+            # Derive VK from qt_key for the legacy path on Windows
+            qt_key  = hk.get('qt_key', int(Qt.Key_0))
+            qt_mods = hk.get('qt_mods', int(Qt.KeypadModifier))
+            is_kp   = bool(qt_mods & int(Qt.KeypadModifier))
+            vk = self._WIN32_NUMPAD_VK.get(qt_key) if is_kp else None
+            if vk is None:
+                # Fall back: try reading the VK for the character directly
+                vk = qt_key if 0x30 <= qt_key <= 0x5A else 0x60
+        mods   = hk.get('modifiers', [])
+        mod_ok = all(
+            user32.GetAsyncKeyState({'ctrl': 0x11, 'shift': 0x10, 'alt': 0x12}[m]) & 0x8000
+            for m in mods if m in ('ctrl', 'shift', 'alt')
+        )
+        pressed = bool(user32.GetAsyncKeyState(vk) & 0x8000) and mod_ok
+        if pressed and not self._hotkey_down:
+            self._hotkey_down = True
+            self._trigger_survey_slot()
+        elif not pressed:
+            self._hotkey_down = False
+
+    def _trigger_survey_slot(self):
+        """Dispatch hotkey press to the right action based on current phase."""
+        phase = self.state.phase
+        if phase == 'routing':
+            self._click_active_route_slot()
+        elif phase in ('surveying', 'calibrating'):
+            self._click_next_survey_slot()
+
+    def _do_click(self, x: int, y: int):
+        """Move cursor to (x, y) and perform one left click — cross-platform."""
+        if _PYNPUT_AVAILABLE:
+            m = _pynput_mouse.Controller()
+            m.position = (x, y)
+            m.press(_pynput_mouse.Button.left)
+            m.release(_pynput_mouse.Button.left)
+        elif sys.platform == 'win32':
+            u = ctypes.windll.user32
+            u.SetCursorPos(x, y)
+            u.mouse_event(0x0002, 0, 0, 0, 0)
+            u.mouse_event(0x0004, 0, 0, 0, 0)
+
+    def _click_active_route_slot(self):
+        """Double-click the active route survey item's inventory slot."""
+        state = self.state
+        active_id = state.active_id
+        if active_id is None:
+            return
+        item = next((i for i in state.items if i['id'] == active_id), None)
+        if item is None:
+            return
+        grid_idx = item['grid_index']
+        slots = self.inv_overlay._slots
+        if grid_idx < len(slots):
+            slot = slots[grid_idx]
+            center = slot.mapToGlobal(QPoint(slot.width() // 2, slot.height() // 2))
+        else:
+            center = self._inv_slot_global_pos(grid_idx)
+            if center is None:
+                return
+        x, y = center.x(), center.y()
+        self._do_click(x, y)
+        QTimer.singleShot(120, lambda: self._second_click(x, y))
+
+    def _click_next_survey_slot(self):
+        """Double-click the next empty inventory slot during the surveying phase."""
+        next_idx = len(self.state.uncollected())
+        slots = self.inv_overlay._slots
+        if next_idx < len(slots):
+            slot = slots[next_idx]
+            center = slot.mapToGlobal(QPoint(slot.width() // 2, slot.height() // 2))
+        else:
+            center = self._inv_slot_global_pos(next_idx)
+            if center is None:
+                return
+        x, y = center.x(), center.y()
+        self._do_click(x, y)
+        QTimer.singleShot(120, lambda: self._second_click(x, y))
+
+    def _inv_slot_global_pos(self, idx):
+        """Compute the global screen centre of inventory slot at index idx,
+        even if that slot widget hasn't been rendered yet."""
+        inv = self.inv_overlay
+        slot_w = max(28, (inv.width() - 12 - SLOT_GAP * (GRID_COLS - 1)) // GRID_COLS)
+        row, col = divmod(idx, GRID_COLS)
+        margin = 6   # _grid_layout ContentsMargins
+        x_off = margin + col * (slot_w + SLOT_GAP) + slot_w // 2
+        y_off = margin + row * (slot_w + SLOT_GAP) + slot_w // 2
+        return inv._grid_container.mapToGlobal(QPoint(x_off, y_off))
+
+    def _second_click(self, x, y):
+        self._do_click(x, y)
+
     # ── overlay visibility ────────────────────────────────────────────────────
     def toggle_route_lines(self):
         self._route_lines_visible = not self._route_lines_visible
@@ -2386,10 +2805,26 @@ class SurveyApp:
         self.save_settings()
 
     def toggle_map_labels(self):
-        self.map_overlay._show_labels = not self.map_overlay._show_labels
+        self.map_overlay._show_labels = (self.map_overlay._show_labels + 1) % 4
         self.map_overlay.refresh()
         self.control.refresh()
         self.save_settings()
+
+    def set_hotkey_binding(self):
+        self._capturing_hotkey = True
+        dlg = HotkeyCaptureDialog(self.control)
+        if dlg.exec_() == QDialog.Accepted and dlg.result_qt_key is not None:
+            self._hotkey_config = {
+                'qt_key':    dlg.result_qt_key,
+                'qt_mods':   dlg.result_qt_mods,
+                'modifiers': dlg.result_mods,
+                'label':     dlg.result_label,
+            }
+            self.control.btn_hotkey.setText(f'Hotkey: {dlg.result_label}')
+            self.save_settings()
+            if _HOTKEY_SUPPORTED:
+                self._start_kb_listener()
+        self._capturing_hotkey = False
 
     def toggle_invert_dirs(self):
         self._invert_dirs = not self._invert_dirs
@@ -2426,6 +2861,7 @@ class SurveyApp:
                 'chat_dir':     self._chat_dir,
                 'survey_count': self.state.survey_count,
                 'map_labels':   self.map_overlay._show_labels,
+                'hotkey':       self._hotkey_config,
                 'inv_locked':   self._inv_locked,
                 'map_click_through': self._click_through,
                 'overlays_visible':     self._overlays_visible,
@@ -2522,7 +2958,26 @@ class SurveyApp:
                 self.control.sb_count.blockSignals(False)
 
             if 'map_labels' in data:
-                self.map_overlay._show_labels = bool(data['map_labels'])
+                raw = data['map_labels']
+                # Backward compat: old bool → 1 (Name) or 0 (Off)
+                if isinstance(raw, bool):
+                    self.map_overlay._show_labels = 1 if raw else 0
+                else:
+                    self.map_overlay._show_labels = int(raw)
+
+            if 'hotkey' in data:
+                hk = data['hotkey']
+                if isinstance(hk, dict):
+                    if 'qt_key' in hk:
+                        self._hotkey_config = hk
+                    elif 'vk' in hk and sys.platform == 'win32':
+                        self._hotkey_config = _migrate_vk_config(hk)
+                    # else: non-Windows with old vk format → keep default
+                    lbl = self._hotkey_config.get('label', 'Num0')
+                    self.control.btn_hotkey.setText(f'Hotkey: {lbl}')
+            # Restart pynput listener with the loaded config
+            if _HOTKEY_SUPPORTED:
+                self._start_kb_listener()
 
             if 'inv_locked' in data:
                 self._inv_locked = bool(data['inv_locked'])
@@ -2806,6 +3261,7 @@ def main():
 
     _apply_grid_config()
     survey = SurveyApp()   # noqa — keeps windows alive
+    app.aboutToQuit.connect(survey._stop_kb_listener)
     sys.exit(app.exec_())
 
 

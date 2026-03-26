@@ -30,7 +30,7 @@ The program relies on chat logs. To enable these, go to the Game Settings, under
 ## Usage (Normal Surveys)
 
 1. Open the **Control Panel**, click **💬 ChatLogs folder**, and select your Project Gorgon `ChatLogs` directory. The program will attempt to locate the default directory.
-2. Drag the Map and Inventory overlays over you map, and you bags. Both of these should be resizeable windows you can click and drag in the bottom right of their section. The boxes should roughly align with your inventory slots.
+2. Drag the Map and Inventory overlays over you map, and you bags. Both of these should be resizeable windows you can click and drag in the bottom right of their section. The boxes should roughly align with your inventory slots. Make sure the inventory is Locked once you have it in place (Inv: Unlocked button on the main window) so that you are able to interact with your inventory to do the surveys.
 3. Set your survey count (number of maps you are running). Make sure these start in the top left of your inventory and go without any non survey maps inbetween.
 4. Click **📍 Set My Position** and click your character's position on the map overlay to establish the origin.
 5. Begin surveying in-game. Each `[Status] The X is Ym DIR` chat message places a dot on the overlay.
@@ -41,6 +41,23 @@ The program relies on chat logs. To enable these, go to the Game Settings, under
 10. Profit!
 
 > **Tip:** The inventory grid layout (`cols`, `slot_size`, `slot_gap`) can be tweaked by editing the `grid` section in `survey_tracker_settings.json` if you dont want to use 10 columns, or your inferace is scaled differently.
+
+## Survey Hotkey
+
+A configurable hotkey (default: **Numpad 0**) lets you trigger inventory slot clicks without leaving the game window.
+
+| Phase | What the hotkey does |
+|-------|----------------------|
+| **Surveying** | Double-clicks the **next empty slot** in the inventory overlay — use it each time you use a survey map in-game to activate it |
+| **Routing** | Double-clicks the **currently highlighted (active) slot** — use it to collect the item at the active route stop |
+
+If you haven't set a survey count, the hotkey still targets the slot that *would* come next based on how many items have been found so far.
+
+**To change the binding:** click the **Hotkey: \<key\>** button in the top-right of the control panel (next to the mode buttons), then press any key or key combination (e.g. `F5`, `Ctrl+Num1`). The binding is saved to `survey_tracker_settings.json` and restored on next launch.
+
+> **Platform support:** Requires `pip install pynput>=1.7`. Windows also works without pynput via a built-in fallback.
+> On **macOS** you must grant Accessibility permission when prompted (*System Settings → Privacy & Security → Accessibility*).
+> On **Linux X11** pynput works without any extra setup. **Linux Wayland** is not supported and the feature is silently disabled.
 
 ## Session Summary
 
@@ -86,9 +103,10 @@ Motherlode surveys give only a raw distance (`The treasure is 2733 meters from h
 
 - Python 3.8+
 - PyQt5
+- pynput >= 1.7 *(optional — enables hotkey on macOS and Linux; Windows has a built-in fallback)*
 
 ```
-pip install PyQt5
+pip install PyQt5 pynput
 ```
 
 ## macOS / Linux Support
