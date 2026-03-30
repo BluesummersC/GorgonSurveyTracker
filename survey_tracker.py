@@ -1560,9 +1560,10 @@ class ControlPanel(QWidget):
         self.btn_start   = self._btn('▶ Start Survey',     self.app.start_surveying,  '#1a3a5a')
         self.btn_done    = self._btn('🗺 Optimize Route',   self.app.done_surveying,   '#5a4a00')
         self.btn_next    = self._btn('→ Skip to Next',      self.app.advance_route,    '#1a3a5a')
+        self.btn_mark    = self._btn('✔ Mark Complete',     self.app.mark_complete,    '#2a4a1a')
         self.btn_reset   = self._btn('🗑 Reset',            self.app.reset_survey,     '#5a1a1a')
         self.btn_summary = self._btn('📊 View Summary',     self.app.show_summary,     '#1a3a4a')
-        for b in (self.btn_set_pos, self.btn_start, self.btn_done, self.btn_next, self.btn_reset, self.btn_summary):
+        for b in (self.btn_set_pos, self.btn_start, self.btn_done, self.btn_next, self.btn_mark, self.btn_reset, self.btn_summary):
             rc_layout.addWidget(b)
         rc_layout.addStretch()
         sec.addWidget(self._regular_controls)
@@ -1709,6 +1710,7 @@ class ControlPanel(QWidget):
                 state.phase in ('surveying', 'calibrating') and placed
             )
             self.btn_next.setVisible(state.phase == 'routing')
+            self.btn_mark.setVisible(state.phase == 'routing')
             self.btn_reset.setVisible(has_items or state.phase != 'idle')
             self.btn_summary.setVisible(
                 getattr(self.app, '_summary_data', None) is not None
@@ -1955,6 +1957,51 @@ class SurveyApp:
             f'➡ Next: {clean_name(item["name"]) if item else "?"}'
             f' — slot {item["grid_index"] + 1 if item else "?"}'
         )
+
+    def mark_complete(self):
+        # Manually mark the current route target as collected (for survey types
+        # with no chat collection message), then advance to the next stop.
+        state = self.state
+        if state.phase != 'routing' or state.active_id is None:
+            return
+        target = next((i for i in state.items if i['id'] == state.active_id), None)
+        if not target or target['collected']:
+            return
+
+        if target['pixel_pos']:
+            state.player_pos = target['pixel_pos']
+            self.map_overlay.refresh()
+
+        target['collected'] = True
+        if self._tracking_xp:
+            self._collection_timestamps.append(datetime.datetime.now())
+        if state.survey_count > 0:
+            state.survey_count -= 1
+            self.control.sb_count.blockSignals(True)
+            self.control.sb_count.setValue(state.survey_count)
+            self.control.sb_count.blockSignals(False)
+        state.reindex()
+        self._set_log(f'✔ {clean_name(target["name"])} marked complete — removed from inventory.')
+
+        remaining = [
+            (idx, iid) for idx, iid in enumerate(state.route_order)
+            if idx > state.route_idx
+            and not next((i for i in state.items if i['id'] == iid), {}).get('collected')
+            and not next((i for i in state.items if i['id'] == iid), {}).get('skipped')
+        ]
+        if not remaining:
+            self._set_log('🎉 All survey items collected — surveying complete!')
+            state.phase = 'idle'
+            self._survey_end_time = datetime.datetime.now()
+            self._summary_data = self._build_summary_data()
+        else:
+            state.route_idx = remaining[0][0]
+            item = next((i for i in state.items if i['id'] == state.active_id), None)
+            self._set_log(
+                f'➡ Next: {clean_name(item["name"]) if item else "?"}'
+                f' — slot {item["grid_index"] + 1 if item else "?"}'
+            )
+        self._refresh_all()
 
     def reset_survey(self):
         if self.state.items:
