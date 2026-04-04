@@ -165,7 +165,7 @@ APP_VERSION = _ver_file.read_text().strip() if _ver_file.exists() else "dev"
 # Log-parsing helpers
 # ─────────────────────────────────────────────────────────────────────────────
 _DIST_RE         = re.compile(r'(\d+(?:\.\d+)?)m\s+(west|east|north|south)', re.IGNORECASE)
-_COLLECT_RE      = re.compile(r'\[Status\]\s+(.+?)\s+collected!')
+_COLLECT_RE      = re.compile(r'\[Status\]\s+(.+?)\s+(?:x\d+\s+)?collected!')
 _SURVEY_CHAT_RE  = re.compile(r'\[Status\]\s+The\s+(.+?)\s+is\s+(.+)', re.IGNORECASE)
 _ML_DIST_RE      = re.compile(r'\[Status\]\s+The treasure is (\d+(?:\.\d+)?) meters from here\.', re.IGNORECASE)
 _ML_COLLECT_RE   = re.compile(r'\[Status\]\s+(?:.+?) Metal Slab x\d+ added to inventory\.', re.IGNORECASE)
@@ -1819,7 +1819,7 @@ class SurveyApp:
         self._chat_dir         = None
         self._chat_file        = None
         self._chat_offset      = 0
-        self._collect_last     = {}   # name_low → time.monotonic() of last collection
+        self._collect_last     = 0.0  # time.monotonic() of last collection
         self._ml_collect_last  = 0.0  # time.monotonic() of last motherlode collection
         self._click_through    = False
         self._inv_locked       = False
@@ -2177,16 +2177,14 @@ class SurveyApp:
         state     = self.state
         name_low  = collected_name.lower()
 
-        print(f'[collect] "{collected_name}" | phase={state.phase} | route_idx={state.route_idx}')
+        print(f'[collect] "{collected_name}" | phase={state.phase} | route_idx={state.route_idx} | time={datetime.datetime.now()}s')
 
-        # Deduplicate: ignore repeated collect events for the same name within 0.5 s.
-        # The game occasionally emits duplicate "X collected!" messages, which would
-        # otherwise consume two consecutive same-named route targets from one pickup.
+        # Deduplicate: ignore repeated collect events within 0.5 s
         now = time.monotonic()
-        if now - self._collect_last.get(name_low, 0) < 0.5:
-            print(f'[collect]   DEDUP — ignored (same name within 0.5 s)')
+        if now - self._collect_last < 0.5:
+            print(f'[collect]   DEDUP — ignored (within 0.5 s)')
             return
-        self._collect_last[name_low] = now
+        self._collect_last = now
 
         # Prefer current route target
         target = None
