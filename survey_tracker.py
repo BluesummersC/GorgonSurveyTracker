@@ -2714,7 +2714,14 @@ class SurveyApp:
             self._click_next_survey_slot()
 
     def _do_click(self, x: int, y: int):
-        """Move cursor to (x, y) and perform one left click — cross-platform."""
+        """Move cursor to (x, y) and perform one left click — cross-platform.
+        x, y are Qt logical coordinates (from mapToGlobal)."""
+        # On Windows, Win32 and pynput both use physical pixels, so scale from
+        # Qt logical coords by the screen's device pixel ratio (fixes 4K/HiDPI).
+        if sys.platform == 'win32':
+            screen = QApplication.screenAt(QPoint(x, y)) or QApplication.primaryScreen()
+            dpr = screen.devicePixelRatio()
+            x, y = round(x * dpr), round(y * dpr)
         if _PYNPUT_AVAILABLE:
             m = _pynput_mouse.Controller()
             m.position = (x, y)
