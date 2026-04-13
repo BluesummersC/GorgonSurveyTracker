@@ -1434,8 +1434,16 @@ class ControlPanel(QWidget):
         self.setWindowTitle(f'Gorgon Survey Tracker v{APP_VERSION}')
         self.setWindowFlags(Qt.Window | Qt.WindowStaysOnTopHint)
         self.setMinimumWidth(480)
+        self._move_save_timer = QTimer(self)
+        self._move_save_timer.setSingleShot(True)
+        self._move_save_timer.timeout.connect(self.app.save_settings)
         self._build_ui()
         self.refresh()
+
+    def moveEvent(self, event):
+        super().moveEvent(event)
+        # Debounce: save position 400 ms after the user stops dragging.
+        self._move_save_timer.start(400)
 
     def _btn(self, text, callback, color='#1a3a6a'):
         b = QPushButton(text)
@@ -2901,6 +2909,7 @@ class SurveyApp:
             SETTINGS_PATH.parent.mkdir(parents=True, exist_ok=True)
             mg = self.map_overlay.geometry()
             ig = self.inv_overlay.geometry()
+            cp = self.control.pos()
             data = {
                 'map':  {
                     'x': mg.x(), 'y': mg.y(), 'w': mg.width(), 'h': mg.height(),
@@ -2910,6 +2919,7 @@ class SurveyApp:
                     'x': ig.x(), 'y': ig.y(), 'w': ig.width(), 'h': ig.height(),
                     'opacity': int(self.inv_overlay._bg_alpha * 100),
                 },
+                'control': {'x': cp.x(), 'y': cp.y()},
                 'chat_dir':     self._chat_dir,
                 'survey_count': self.state.survey_count,
                 'map_labels':   self.map_overlay._show_labels,
@@ -2992,6 +3002,10 @@ class SurveyApp:
                     overlay.resize(s['w'], s['h'])
                 if 'opacity' in s:
                     overlay._bg_alpha = s['opacity'] / 100.0
+
+            cs = data.get('control', {})
+            if 'x' in cs and 'y' in cs:
+                self.control.move(cs['x'], cs['y'])
 
             # Sync slider / spinbox values (block signals to avoid triggering save_settings
             # before log_path / chat_dir have been restored)
