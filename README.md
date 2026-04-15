@@ -25,7 +25,7 @@ You can download the survey tool [Here](https://github.com/kaeus/GorgonSurveyTra
 
 ## In game setup
 
-The program relies on chat logs. To enable these, go to the Game Settings, under the V.I.P. category, and make sure you tick 'Enabled' for 'Save Chat Logs' under the Chat Logs section. The program will automatically attempt to locate the chat log folder based on it's default location, but should that not work, this section also has an 'Open Folder' button that should show you where they are saved to.
+The program relies on chat logs. To enable these, go to the Game Settings, under the GUI category, and make sure you tick 'Enabled' for 'Save Chat Logs' under the Chat Logs section (located at the very bottom). The program will automatically attempt to locate the chat log folder based on it's default location, but should that not work, this section also has an 'Open Folder' button that should show you where they are saved to.
 
 ## Usage (Normal Surveys)
 
