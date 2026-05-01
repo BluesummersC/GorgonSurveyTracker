@@ -1,9 +1,28 @@
-# GorgonSurveyTracker
+# Project Gorgon Survey Tracker
+![Latest release](https://img.shields.io/github/v/release/kaeus/GorgonSurveyTracker)
+![Downloads](https://img.shields.io/github/downloads/kaeus/GorgonSurveyTracker/total)
 
-A transparent overlay tool for **Project Gorgon** that helps players track and collect survey map items in real time.
+A free, open-source **survey tracker and companion overlay for Project Gorgon**.
+Automatically plots Surveying, Mining, and Geology dots on a transparent map
+overlay by watching the in-game ChatLogs, optimises your collection route, and
+removes items from a virtual inventory as you collect them in-game. Supports
+both normal surveys and motherlode (trilateration) runs.
 
-## How to Start
-You can download the survey tool [Here](https://github.com/kaeus/GorgonSurveyTracker/releases) by downloading the latest `GorgonSurveyTracker.exe`. Instructions to run from source are down below if you prefer that!
+**[⬇ Download the latest release](https://github.com/kaeus/GorgonSurveyTracker/releases)** —
+grab `GorgonSurveyTracker.exe` and run it. No install, no setup script. Running
+from source? See [below](#build-requirements).
+
+Looking to configure it for the first time? See [Setup](#in-game-setup).
+
+## What it does
+
+Project Gorgon's Surveying skill generates maps that point you to crystal,
+metal, and gem nodes but tracking multiple surveys at once, remembering
+which item is where, and routing efficiently between them is all manual.
+This tool watches your chat log in real time, places each survey target on
+a transparent overlay sitting on top of the game's map window, and guides
+you through collecting them in the shortest path. Works with regular survey
+maps and motherlode maps.
 
 ## Overview
 
@@ -30,17 +49,20 @@ The program relies on chat logs. To enable these, go to the Game Settings, under
 ## Usage (Normal Surveys)
 
 1. Open the **Control Panel**, click **💬 ChatLogs folder**, and select your Project Gorgon `ChatLogs` directory. The program will attempt to locate the default directory.
-2. Drag the Map and Inventory overlays over you map, and you bags. Both of these should be resizeable windows you can click and drag in the bottom right of their section. The boxes should roughly align with your inventory slots. Make sure the inventory is Locked once you have it in place (Inv: Unlocked button on the main window) so that you are able to interact with your inventory to do the surveys.
+2. Drag the Map and Inventory overlays over you map, and you bags. Both of these should be resizeable windows you can click and drag in the bottom right of their section. The boxes should roughly align with your inventory slots. 
+3. Make sure the Inventory and Map are **Locked** once you have it in place (Inv: Unlocked/Map Pass-thru buttons on the main window or the Lock Icon) so that you are able to interact with your inventory and the overlay to do the surveys.
+   - The map overlay can cover your whole map window, not just the actual map inside the window. As long as you are covering the map inside in some way, you should be fine.
 3. Set your survey count (number of maps you are running). Make sure these start in the top left of your inventory and go without any non survey maps inbetween.
 4. Click **📍 Set My Position** and click your character's position on the map overlay to establish the origin.
 5. Begin surveying in-game. Each `[Status] The X is Ym DIR` chat message places a dot on the overlay.
 6. On the first area, click it on the map to calibrate the scale. Subsequent dots appear automatically, but can be adjusted by clicking the map.
+   - Since scale is done based on relative distance from your point , you may have to re-calibrate. Further away points help reduce any estimation error and will lead to better auto estimation in subsequent surveys.
 7. Use **🗺 Optimize Route** to step through the nearest-neighbour path to collect each item efficiently. This also starts the session timer for the summary.
 8. Collect items in-game — they are removed from the inventory grid automatically when the chat log shows `"X collected!"`. Click **→ Skip to Next** to skip a node if necessary.
 9. Once the final item is collected, a **📊 View Summary** button appears next to Reset. Click it to see your session breakdown.
 10. Profit!
 
-> **Tip:** The inventory grid layout (`cols`, `slot_size`, `slot_gap`) can be tweaked by editing the `grid` section in `survey_tracker_settings.json` if you dont want to use 10 columns, or your inferace is scaled differently.
+> **Tip:** The inventory grid layout (`cols`) can be tweaked by editing the `grid` section in `survey_tracker_settings.json` if you dont want to use 10 columns. The sizing should auto scale as you resize the inventory window to match your screen.
 
 ## Survey Hotkey
 
