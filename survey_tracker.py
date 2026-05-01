@@ -414,6 +414,7 @@ class HotkeyButton(QPushButton):
     def __init__(self, text):
         super(HotkeyButton, self).__init__()
         self.signal_emitter = HotkeySignal()
+        self.setText(text)
 
     def mousePressEvent(self, QMouseEvent):
         if QMouseEvent.button() == Qt.LeftButton:
