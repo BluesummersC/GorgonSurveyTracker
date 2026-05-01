@@ -419,7 +419,6 @@ class HotkeyButton(QPushButton):
         if QMouseEvent.button() == Qt.LeftButton:
             self.clicked.emit()
         elif QMouseEvent.button() == Qt.RightButton:
-            print('right clicked')
             self.signal_emitter.right_clicked.emit()
 
 
@@ -1751,7 +1750,7 @@ class ControlPanel(QWidget):
         row_mode = QHBoxLayout()
         self.btn_mode_regular = self._btn('Regular Survey',    self.app.exit_ml_mode,  '#1a3a6a')
         self.btn_mode_ml      = self._btn('Motherlode Survey', self.app.enter_ml_mode, '#4a1a4a')
-        self.btn_hotkey       = self._small_btn('Hotkey: Num0', self.app.set_hotkey_binding, '#1a3a2a')
+        self.btn_hotkey       = self._hotkey_btn('Hotkey: Num0', self.app.set_hotkey_binding, self.app.remove_hotkey_binding, '#1a3a2a')
         self.btn_mapkey       = self._hotkey_btn('Map: M', self.app.set_mapkey_binding, self.app.remove_mapkey_binding, '#1a3a2a')
         self.btn_invkey       = self._hotkey_btn('Inv: I', self.app.set_invkey_binding, self.app.remove_invkey_binding, '#1a3a2a')
         row_mode.addWidget(self.btn_mode_regular)
@@ -3438,6 +3437,16 @@ class SurveyApp:
             # if _HOTKEY_SUPPORTED:
             #     self._start_kb_listener()
         self._capturing_hotkey = False
+
+    def remove_hotkey_binding(self):
+        self._hotkey_config = {
+            'qt_key':    0,
+            'qt_mods':   0,
+            'modifiers': [],
+            'label':     "--",
+        }
+        self.control.btn_hotkey.setText(f'Hotkey: --')
+        self.save_settings()
 
     def set_mapkey_binding(self):
         self._capturing_hotkey = True
