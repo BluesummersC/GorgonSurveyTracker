@@ -1653,6 +1653,7 @@ class ControlPanel(QWidget):
             f'padding:2px 6px; border-radius:3px; font-size:10px; font-weight:600; }}'
             f'QPushButton:hover {{ background: #2a3a5a; }}'
         )
+        b.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Fixed)
         return b
 
     def _label(self, text, color='#778'):
@@ -1753,10 +1754,13 @@ class ControlPanel(QWidget):
         row_mode.addWidget(self.btn_mode_regular)
         row_mode.addWidget(self.btn_mode_ml)
         row_mode.addStretch()
-        row_mode.addWidget(self.btn_hotkey)
+        hotkey_buttons = QHBoxLayout()
+        hotkey_buttons.setContentsMargins(5,0,5,0)
+        hotkey_buttons.addWidget(self.btn_hotkey)
         if _HOTKEY_SUPPORTED:
-            row_mode.addWidget(self.btn_mapkey)
-            row_mode.addWidget(self.btn_invkey)
+            hotkey_buttons.addWidget(self.btn_mapkey)
+            hotkey_buttons.addWidget(self.btn_invkey)
+        row_mode.addLayout(hotkey_buttons)
         main.addLayout(row_mode)
 
         # ── Files row ──────────────────────────────────────────────────────
@@ -3004,7 +3008,6 @@ class SurveyApp:
                 self._hk_bridge.triggered.emit()
             if self._pynput_mapkey_matches(key):
                 self._maphotkey_down = True
-                print('emit')
                 self._maphk_bridge.triggered.emit()
             if self._pynput_invkey_matches(key):
                 self._invhotkey_down = True
@@ -3330,7 +3333,6 @@ class SurveyApp:
     #     self.save_settings()
 
     def toggle_map_overlay(self):
-        print(f'triggered: {time.time()}')
         self._map_visible = not self._map_visible
         if self._map_visible:
             self.map_overlay.show()
@@ -3435,6 +3437,8 @@ class SurveyApp:
             # if _HOTKEY_SUPPORTED:
             #     self._start_kb_listener()
         self._capturing_hotkey = False
+        self.control.adjustSize()
+        self.control.adjustSize()
 
     def remove_hotkey_binding(self):
         self._hotkey_config = {
@@ -3445,6 +3449,8 @@ class SurveyApp:
         }
         self.control.btn_hotkey.setText(f'Hotkey: --')
         self.save_settings()
+        self.control.adjustSize()
+        self.control.adjustSize()
 
     def set_mapkey_binding(self):
         self._capturing_hotkey = True
@@ -3462,6 +3468,8 @@ class SurveyApp:
             # if _HOTKEY_SUPPORTED:
             #     self._start_kb_listener()
         self._capturing_hotkey = False
+        self.control.adjustSize()
+        self.control.adjustSize()
 
     def remove_mapkey_binding(self):
         self._mapkey_config = {
@@ -3472,6 +3480,8 @@ class SurveyApp:
         }
         self.control.btn_mapkey.setText(f'Map: --')
         self.save_settings()
+        self.control.adjustSize()
+        self.control.adjustSize()
 
 
     def set_invkey_binding(self):
@@ -3490,6 +3500,8 @@ class SurveyApp:
             # if _HOTKEY_SUPPORTED:
             #     self._start_kb_listener()
         self._capturing_hotkey = False
+        self.control.adjustSize()
+        self.control.adjustSize()
 
     def remove_invkey_binding(self):
         self._invkey_config = {
@@ -3500,6 +3512,8 @@ class SurveyApp:
         }
         self.control.btn_invkey.setText(f'Inv: --')
         self.save_settings()
+        self.control.adjustSize()
+        self.control.adjustSize()
 
     def toggle_invert_dirs(self):
         self._invert_dirs = not self._invert_dirs
