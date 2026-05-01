@@ -1552,7 +1552,7 @@ class SummaryWindow(QDialog):
 class HotkeyCaptureDialog(QDialog):
     """Modal dialog that captures a single keypress (+ modifiers) as a hotkey."""
 
-    def __init__(self, parent=None):
+    def __init__(self, text, parent=None):
         super().__init__(parent)
         self.result_qt_key  = None   # int — Qt.Key_* value
         self.result_qt_mods = 0      # int — Qt.KeyboardModifiers flags
@@ -1560,11 +1560,7 @@ class HotkeyCaptureDialog(QDialog):
         self.result_label   = ''
         self.setWindowTitle('Set Hotkey')
         self.setWindowFlags(Qt.Dialog | Qt.WindowStaysOnTopHint)
-        lbl = QLabel(
-            'Press the desired key combination (Esc = cancel)\n\n'
-            'During Surveying: clicks the next empty inventory slot\n'
-            'During Routing: double-clicks the active slot to collect it'
-        )
+        lbl = QLabel(text)
         lbl.setAlignment(Qt.AlignCenter)
         lbl.setStyleSheet('color:#cde; font-size:11px; padding:12px;')
         layout = QVBoxLayout(self)
@@ -3425,7 +3421,8 @@ class SurveyApp:
 
     def set_hotkey_binding(self):
         self._capturing_hotkey = True
-        dlg = HotkeyCaptureDialog(self.control)
+        lbl = "Press the desired key combination (Esc = cancel)\n\nDuring Surveying: clicks the next empty Inventory slot\nDuring Routing: double-clicks the active slot to collect it"
+        dlg = HotkeyCaptureDialog(lbl, self.control)
         if dlg.exec_() == QDialog.Accepted and dlg.result_qt_key is not None:
             self._hotkey_config = {
                 'qt_key':    dlg.result_qt_key,
@@ -3451,7 +3448,8 @@ class SurveyApp:
 
     def set_mapkey_binding(self):
         self._capturing_hotkey = True
-        dlg = HotkeyCaptureDialog(self.control)
+        lbl = "Press the desired key combination (Esc = cancel)\n\nUse: Click to toggle the Map overlay.\nYou can assign the same key as the Inventory toggle."
+        dlg = HotkeyCaptureDialog(lbl, self.control)
         if dlg.exec_() == QDialog.Accepted and dlg.result_qt_key is not None:
             self._mapkey_config = {
                 'qt_key':    dlg.result_qt_key,
@@ -3478,7 +3476,8 @@ class SurveyApp:
 
     def set_invkey_binding(self):
         self._capturing_hotkey = True
-        dlg = HotkeyCaptureDialog(self.control)
+        lbl = " Press the desired key combination (Esc = cancel)\n\nUse: Click to toggle the inventory overlay.\nYou can assign the same key as the Map toggle."
+        dlg = HotkeyCaptureDialog(lbl, self.control)
         if dlg.exec_() == QDialog.Accepted and dlg.result_qt_key is not None:
             self._invkey_config = {
                 'qt_key':    dlg.result_qt_key,
